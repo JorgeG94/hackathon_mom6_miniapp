@@ -1,0 +1,62 @@
+# MOM6 Mini-Apps - Fortran Package Manager Configuration
+#
+# Build with: fpm build
+# Run app:    fpm run <app-name> -- <args>
+#
+# Examples:
+#   fpm build --profile release
+#   fpm run continuity_driver -- 180 180 75 10
+#   fpm run rk2_driver -- 180 180 75 10 30
+
+name = "mom6_miniapps"
+version = "1.0.0"
+license = "Apache"
+author = "MOM6 GPU Hackathon Team"
+maintainer = "hackathon@example.com"
+copyright = "2025"
+
+[build]
+auto-executables = true
+auto-tests = false
+auto-examples = false
+external-modules = ["nvtx"]
+
+[preprocess]
+[preprocess.cpp]
+suffixes = ["F90", "f90"]
+
+# Library source directory
+[library]
+source-dir = "src"
+
+
+# Driver executables
+[[executable]]
+name = "continuity_driver"
+source-dir = "app"
+main = "continuity_driver.F90"
+
+[[executable]]
+name = "coriolis_driver"
+source-dir = "app"
+main = "coriolis_driver.F90"
+
+[[executable]]
+name = "barotropic_driver"
+source-dir = "app"
+main = "barotropic_driver.F90"
+
+[[executable]]
+name = "vert_visc_driver"
+source-dir = "app"
+main = "vert_visc_driver.F90"
+
+[[executable]]
+name = "rk2_driver"
+source-dir = "app"
+main = "rk2_driver.F90"
+
+# Dependencies (none for this self-contained package)
+ [dependencies]
+ openmp="*"
+# stdlib = "*"
