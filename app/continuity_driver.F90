@@ -1,9 +1,10 @@
 !> Standalone driver for the continuity miniapp
 program continuity_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
-   use mom6_types
-   use mom6_continuity
+   use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
+                         init_verticalGrid, end_ocean_grid
+   use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
    implicit none
 
    type(ocean_grid_type) :: G

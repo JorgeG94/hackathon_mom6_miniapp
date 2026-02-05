@@ -25,11 +25,11 @@ module mom6_barotropic
 
       ! State arrays (2D)
       real(dp), allocatable :: eta(:, :)      ! Free surface height [H]
-      real(dp), allocatable :: eta_pred(:, :) ! Predictor eta [H]
+      real(dp), allocatable :: eta_pred(:, :)  ! Predictor eta [H]
       real(dp), allocatable :: ubt(:, :)      ! Zonal barotropic velocity [L T-1]
       real(dp), allocatable :: vbt(:, :)      ! Meridional barotropic velocity [L T-1]
-      real(dp), allocatable :: ubt_prev(:, :) ! Previous ubt [L T-1]
-      real(dp), allocatable :: vbt_prev(:, :) ! Previous vbt [L T-1]
+      real(dp), allocatable :: ubt_prev(:, :)  ! Previous ubt [L T-1]
+      real(dp), allocatable :: vbt_prev(:, :)  ! Previous vbt [L T-1]
       real(dp), allocatable :: uhbt(:, :)     ! Zonal transport [H L2 T-1]
       real(dp), allocatable :: vhbt(:, :)     ! Meridional transport [H L2 T-1]
       real(dp), allocatable :: PFu(:, :)      ! Zonal pressure force [L T-2]
@@ -46,8 +46,8 @@ module mom6_barotropic
       real(dp), allocatable :: gtot_S(:, :)   ! Effective gravity (S)
       real(dp), allocatable :: f_4_u(:, :, :)  ! Coriolis coefficients at u [T-1]
       real(dp), allocatable :: f_4_v(:, :, :)  ! Coriolis coefficients at v [T-1]
-      real(dp), allocatable :: bt_rem_u(:, :) ! Drag remainder at u [nondim]
-      real(dp), allocatable :: bt_rem_v(:, :) ! Drag remainder at v [nondim]
+      real(dp), allocatable :: bt_rem_u(:, :)  ! Drag remainder at u [nondim]
+      real(dp), allocatable :: bt_rem_v(:, :)  ! Drag remainder at v [nondim]
 
       ! Output arrays
       real(dp), allocatable :: ubt_av(:, :)   ! Time-averaged ubt [L T-1]

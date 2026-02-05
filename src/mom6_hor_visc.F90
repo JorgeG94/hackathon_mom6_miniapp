@@ -37,8 +37,8 @@ module mom6_hor_visc
       real(dp), allocatable :: dy2q(:, :)    ! dy^2 at q-points [L2]
       real(dp), allocatable :: DX_dyT(:, :)  ! dx/dy ratio at h-points [nondim]
       real(dp), allocatable :: DY_dxT(:, :)  ! dy/dx ratio at h-points [nondim]
-      real(dp), allocatable :: DX_dyBu(:, :) ! dx/dy ratio at q-points [nondim]
-      real(dp), allocatable :: DY_dxBu(:, :) ! dy/dx ratio at q-points [nondim]
+      real(dp), allocatable :: DX_dyBu(:, :)  ! dx/dy ratio at q-points [nondim]
+      real(dp), allocatable :: DY_dxBu(:, :)  ! dy/dx ratio at q-points [nondim]
 
       ! Work arrays (2D, reused per layer)
       real(dp), allocatable :: dudx(:, :)    ! du/dx at h-points [T-1]
@@ -174,8 +174,8 @@ contains
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u   ! Zonal velocity [L T-1]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: v   ! Meridional velocity [L T-1]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h   ! Layer thickness [H]
-      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffu ! Zonal viscous accel [L T-2]
-      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffv ! Merid viscous accel [L T-2]
+      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffu  ! Zonal viscous accel [L T-2]
+      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffv  ! Merid viscous accel [L T-2]
       type(hor_visc_CS), intent(inout) :: CS
 
       real(dp) :: Kh, Idx2, Idy2

@@ -74,7 +74,7 @@ contains
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u    ! Zonal velocity [L T-1]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: v    ! Meridional velocity [L T-1]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: hin  ! Initial thickness [H]
-      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(inout) :: h ! Final thickness [H]
+      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(inout) :: h  ! Final thickness [H]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: uh  ! Zonal flux [H L2 T-1]
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: vh  ! Meridional flux [H L2 T-1]
       real(dp), intent(in) :: dt        ! Time step [T]

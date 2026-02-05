@@ -28,8 +28,8 @@ module mom6_coriolis
       ! Work arrays (2D, reused per layer)
       real(dp), allocatable :: dvdx(:, :)     ! d(v*dy)/dx
       real(dp), allocatable :: dudy(:, :)     ! d(u*dx)/dy
-      real(dp), allocatable :: rel_vort(:, :) ! Relative vorticity
-      real(dp), allocatable :: abs_vort(:, :) ! Absolute vorticity
+      real(dp), allocatable :: rel_vort(:, :)  ! Relative vorticity
+      real(dp), allocatable :: abs_vort(:, :)  ! Absolute vorticity
       real(dp), allocatable :: q(:, :)        ! Potential vorticity
       real(dp), allocatable :: Ih_q(:, :)     ! Inverse thickness at q-points
       real(dp), allocatable :: hArea_u(:, :)  ! h*Area at u-points
@@ -123,8 +123,8 @@ contains
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h   ! Layer thickness
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: uh  ! Zonal transport
       real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: vh  ! Meridional transport
-      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: CAu ! Zonal acceleration
-      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: CAv ! Meridional acceleration
+      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: CAu  ! Zonal acceleration
+      real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: CAv  ! Meridional acceleration
       type(coriolis_CS), intent(inout) :: CS
 
       real(dp) :: hArea_q, vol_neglect, KEx, KEy

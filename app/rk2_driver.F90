@@ -16,17 +16,22 @@
 !!      - Final continuity update
 !!
 program rk2_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
    use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                          init_verticalGrid, end_ocean_grid, G_EARTH
-   use mom6_continuity
-   use mom6_coriolis
-   use mom6_barotropic
-   use mom6_vert_visc
-   use mom6_hor_visc
-   use mom6_diag
-   use mom6_profiler
+   use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
+   use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
+                            SADOURNY75_ENERGY
+   use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
+   use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
+                             vert_visc_apply, vert_visc_end
+   use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
+   use mom6_diag, only: diag_ctrl, diag_init, diag_end, register_diag_field, DIAG_STATS, &
+                        post_data_3d, post_data_2d, post_product_sum_u, post_product_sum_v, &
+                        diag_report_timing
+   use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
+                            profiler_report
    implicit none
 
    ! Grid structures
@@ -50,12 +55,12 @@ program rk2_driver
    real(dp), allocatable :: uh(:, :, :), vh(:, :, :)     ! Layer transports
    real(dp), allocatable :: CAu(:, :, :), CAv(:, :, :)   ! Coriolis accelerations
    real(dp), allocatable :: up(:, :, :), vp(:, :, :)     ! Predictor velocities
-   real(dp), allocatable :: diffu(:, :, :), diffv(:, :, :) ! Horizontal viscous accelerations
+   real(dp), allocatable :: diffu(:, :, :), diffv(:, :, :)  ! Horizontal viscous accelerations
 
    ! 2D barotropic variables
    real(dp), allocatable :: eta(:, :)                 ! Sea surface height
    real(dp), allocatable :: ubt(:, :), vbt(:, :)       ! Barotropic velocities
-   real(dp), allocatable :: ubt_av(:, :), vbt_av(:, :) ! Time-averaged BT velocities
+   real(dp), allocatable :: ubt_av(:, :), vbt_av(:, :)  ! Time-averaged BT velocities
    real(dp), allocatable :: eta_av(:, :)              ! Time-averaged SSH
 
    ! Timing

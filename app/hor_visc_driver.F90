@@ -1,9 +1,10 @@
 !> Standalone driver for the horizontal viscosity miniapp
 program hor_visc_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
-   use mom6_types
-   use mom6_hor_visc
+   use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
+                         init_verticalGrid, end_ocean_grid
+   use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
    implicit none
 
    type(ocean_grid_type) :: G

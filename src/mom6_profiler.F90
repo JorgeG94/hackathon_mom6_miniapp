@@ -31,7 +31,7 @@
 module mom6_profiler
    use iso_fortran_env, only: dp => real64, int64
 #ifdef USE_NVTX
-   use nvtx
+   use nvtx, only: nvtxStartRange, nvtxEndRange
 #endif
    implicit none
    private

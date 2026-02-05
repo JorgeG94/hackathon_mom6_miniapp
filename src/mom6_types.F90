@@ -6,7 +6,11 @@
 module mom6_types
    use iso_fortran_env, only: dp => real64
    implicit none
-   public
+   private
+
+   public :: ocean_grid_type, verticalGrid_type
+   public :: G_EARTH, RHO_0, OMEGA
+   public :: init_ocean_grid, end_ocean_grid, init_verticalGrid
 
    !> Ocean grid structure (simplified from MOM6's ocean_grid_type)
    type :: ocean_grid_type
@@ -33,7 +37,7 @@ module mom6_types
       real(dp), allocatable :: IdyCv(:, :)    ! Inverse dy at v-points [L-1]
       real(dp), allocatable :: IareaBu(:, :)  ! Inverse area at q-points [L-2]
       real(dp), allocatable :: areaBu(:, :)   ! Area at q-points [L2]
-      real(dp), allocatable :: CoriolisBu(:, :) ! Coriolis parameter at q-points [T-1]
+      real(dp), allocatable :: CoriolisBu(:, :)  ! Coriolis parameter at q-points [T-1]
 
       ! Additional metrics for horizontal viscosity
       real(dp), allocatable :: IareaCu(:, :)  ! Inverse area at u-points [L-2]
@@ -44,9 +48,9 @@ module mom6_types
       real(dp), allocatable :: IdyBu(:, :)    ! Inverse dy at q-points [L-1]
       real(dp), allocatable :: bathyT(:, :)   ! Bathymetry at h-points [Z]
       real(dp), allocatable :: mask2dT(:, :)  ! Mask at h-points (0=land, 1=ocean)
-      real(dp), allocatable :: mask2dBu(:, :) ! Mask at q-points
-      real(dp), allocatable :: mask2dCu(:, :) ! Mask at u-points
-      real(dp), allocatable :: mask2dCv(:, :) ! Mask at v-points
+      real(dp), allocatable :: mask2dBu(:, :)  ! Mask at q-points
+      real(dp), allocatable :: mask2dCu(:, :)  ! Mask at u-points
+      real(dp), allocatable :: mask2dCv(:, :)  ! Mask at v-points
 
       ! Grid spacing (uniform for simplicity)
       real(dp) :: dx, dy          ! Grid spacing [L]
@@ -64,7 +68,7 @@ module mom6_types
    !> Physical constants
    real(dp), parameter :: G_EARTH = 9.80_dp    ! Gravitational acceleration [m s-2]
    real(dp), parameter :: RHO_0 = 1035.0_dp    ! Reference density [kg m-3]
-   real(dp), parameter :: OMEGA = 7.2921e-5_dp ! Earth rotation rate [s-1]
+   real(dp), parameter :: OMEGA = 7.2921e-5_dp  ! Earth rotation rate [s-1]
 
 contains
 

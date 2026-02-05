@@ -1,9 +1,11 @@
 !> Standalone driver for the vertical viscosity miniapp
 program vert_visc_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
-   use mom6_types
-   use mom6_vert_visc
+   use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
+                         init_verticalGrid, end_ocean_grid
+   use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
+                             vert_visc_remnant, vert_visc_apply, vert_visc_end
    implicit none
 
    type(ocean_grid_type) :: G

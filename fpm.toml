@@ -60,3 +60,7 @@ main = "rk2_driver.F90"
  [dependencies]
  openmp="*"
 # stdlib = "*"
+[extra.fortitude.check]
+select = ["C", "E", "S"]
+ignore = ["C003", "C072"]
+line-length = 132

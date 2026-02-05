@@ -1,9 +1,9 @@
 !> Standalone driver for the barotropic solver miniapp
 program barotropic_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
-   use mom6_types
-   use mom6_barotropic
+   use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid
+   use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
    implicit none
 
    type(ocean_grid_type) :: G

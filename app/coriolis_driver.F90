@@ -1,9 +1,11 @@
 !> Standalone driver for the Coriolis/momentum advection miniapp
 program coriolis_driver
-   use omp_lib
+   use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
-   use mom6_types
-   use mom6_coriolis
+   use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
+                         init_verticalGrid, end_ocean_grid
+   use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
+                            SADOURNY75_ENERGY, ARAKAWA_HSU90, ARAKAWA_LAMB81
    implicit none
 
    type(ocean_grid_type) :: G
