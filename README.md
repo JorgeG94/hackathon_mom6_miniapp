@@ -17,12 +17,14 @@ These mini-apps capture the computational patterns and bottlenecks of MOM6's cor
 
 ## Building
 
-### Using the Fortran Package Manager (please try it and let me know any qualms) 
+### Using the Fortran Package Manager (please try it and let me know any qualms)
+
+See [here](https://fpm.fortran-lang.org/install/index.html#install)
 
 ```
-git clone git@github.com:fortran-lang/fpm.git 
-cd fpm 
-./install.sh 
+git clone git@github.com:fortran-lang/fpm.git
+cd fpm
+./install.sh
 export PATH=$PATH:$HOME/.local/bin
 ```
 

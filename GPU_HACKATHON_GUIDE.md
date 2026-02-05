@@ -48,7 +48,7 @@ hackathon_mom6_miniapp/
 ## 2. RK2 Time-Stepping Flow
 
 **File:** `src/core/MOM_dynamics_split_RK2.F90`
-**Main Subroutine:** `step_MOM_dyn_split_RK2` 
+**Main Subroutine:** `step_MOM_dyn_split_RK2`
 
 ### Algorithm: Split Baroclinic-Barotropic RK2
 
@@ -65,7 +65,7 @@ PREDICTOR PHASE:
 ├──  vertvisc(up, vp, h, ...)                      # Apply vertical viscosity (tridiagonal)
 └──  continuity(up, vp, h, hp, uh, vh, ...)        # Main predictor continuity
 
-CORRECTOR PHASE 
+CORRECTOR PHASE
 ├──  horizontal_viscosity(u_av, v_av, h_av, ..., diffu, diffv)  # Horizontal viscosity
 ├──  CorAdCalc(u_av, v_av, h_av, ..., CAu, CAv)    # Corrector Coriolis
 ├──  btstep(u, v, eta, dt, ..., u_av, v_av, u_accel_bt, v_accel_bt)  # Barotropic
@@ -97,38 +97,38 @@ dh/dt = -div(uh, vh) = -d(uh)/dx - d(vh)/dy
 call PPM_reconstruction_x(h_in, h_W, h_E, ...)
 
 ! 2. Compute zonal mass fluxes
-call zonal_mass_flux(u, h_in, uh, ...)       
+call zonal_mass_flux(u, h_in, uh, ...)
 
 ! 3. Apply zonal convergence
 call continuity_zonal_convergence(h_in, h, uh, ...)
 
 ! 4. PPM reconstruction for meridional edges (using updated h)
-call PPM_reconstruction_y(h, h_S, h_N, ...)              
+call PPM_reconstruction_y(h, h_S, h_N, ...)
 
 ! 5. Compute meridional mass fluxes
-call meridional_mass_flux(v, h, vh, ...)                
+call meridional_mass_flux(v, h, vh, ...)
 
 ! 6. Apply meridional convergence
-call continuity_merdional_convergence(h, vh, ...)      
+call continuity_merdional_convergence(h, vh, ...)
 ```
 
 ### Critical GPU Loops
 
-#### Zonal Convergence 
+#### Zonal Convergence
 ```fortran
 do concurrent (k=1:nz, j=jsh:jeh, i=ish:ieh)
   h(i,j,k) = max( hin(i,j,k) - dt * G%IareaT(i,j) * (uh(I,j,k) - uh(I-1,j,k)), h_min )
 enddo
 ```
 
-#### Meridional Convergence 
+#### Meridional Convergence
 ```fortran
 do concurrent (k=1:nz, j=jsh:jeh, i=ish:ieh)
   h(i,j,k) = max( h(i,j,k) - dt * G%IareaT(i,j) * (vh(i,J,k) - vh(i,J-1,k)), h_min )
 enddo
 ```
 
-#### PPM Flux Element Calculation 
+#### PPM Flux Element Calculation
 ```fortran
 ! For u > 0 (upwind from left):
 CFL = (u * dt) * (G_dy_Cu * G_IareaT)
@@ -137,7 +137,7 @@ dh = h_L - h_R
 uh = tmp * u * (h_R + CFL * (0.5*dh + curv_3*(CFL - 1.5)))
 ```
 
-### GPU Memory Management 
+### GPU Memory Management
 ```fortran
 !$omp target enter data map(alloc: h_W, h_E, h_S, h_N)
 ! ... computational loops ...
@@ -169,7 +169,7 @@ CAv = +(f + zeta) * u_transport/h + d/dy(KE)    [meridional acceleration]
 
 ### Critical GPU Loops
 
-#### Relative Vorticity 
+#### Relative Vorticity
 ```fortran
 do concurrent (J=Jsq:Jeq, I=Isq:Ieq)
   ! Free-slip boundary condition
@@ -177,7 +177,7 @@ do concurrent (J=Jsq:Jeq, I=Isq:Ieq)
 enddo
 ```
 
-#### Potential Vorticity 
+#### Potential Vorticity
 ```fortran
 do concurrent (J=Jsq:Jeq, I=Isq:Ieq)
   abs_vort(I,J) = G%CoriolisBu(I,J) + rel_vort(I,J)
@@ -185,7 +185,7 @@ do concurrent (J=Jsq:Jeq, I=Isq:Ieq)
 enddo
 ```
 
-#### Coriolis Acceleration - SADOURNY75_ENERGY 
+#### Coriolis Acceleration - SADOURNY75_ENERGY
 ```fortran
 do concurrent (k=1:nz, j=js:je, I=Isq:Ieq)
   CAu(I,j,k) = 0.25 * ( (q(I,J) * (vh(i+1,J,k) + vh(i,J,k))) + &
@@ -648,4 +648,3 @@ make FC=nvfortran GPU=yes NVTX=yes
 nsys profile -o profile_report ./rk2_driver 360 360 75 10 30
 nsys-ui profile_report.nsys-rep
 ```
-
