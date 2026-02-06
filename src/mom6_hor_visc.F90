@@ -391,22 +391,29 @@ contains
         type(hor_visc_CS), intent(inout) :: CS
 
         ! Background and max viscosity
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(to: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
         !$omp target enter data map(to: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
+#endif
 
         ! Smagorinsky/Leith constants
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(to: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
         !$omp target enter data map(to: CS%Biharm_const_xx, CS%Biharm_const_xy)
         !$omp target enter data map(to: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
         !$omp target enter data map(to: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+#endif
 
         ! Metrics
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(to: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target enter data map(to: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
         !$omp target enter data map(to: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
         !$omp target enter data map(to: CS%reduction_xx, CS%reduction_xy)
+#endif
 
         ! Work arrays
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
         !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
         !$omp target enter data map(alloc: CS%bhstr_xx, CS%bhstr_xy)
@@ -414,13 +421,16 @@ contains
         !$omp target enter data map(alloc: CS%Kh, CS%Ah, CS%Shear_mag)
         !$omp target enter data map(alloc: CS%Del2u, CS%Del2v)
         !$omp target enter data map(alloc: CS%hrat_min, CS%visc_bound_rem)
+#endif
 
         ! Leith arrays (allocated on GPU but computed on CPU, then transferred)
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
         !$omp target enter data map(alloc: CS%grad_vort_mag_h, CS%grad_vort_mag_q, CS%vert_vort_mag)
         !$omp target enter data map(alloc: CS%Del2vort_q)
         !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
         !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
+#endif
 
     end subroutine map_hor_visc_to_gpu
 
@@ -431,6 +441,7 @@ contains
         if (.not. CS%initialized) return
 
         ! Unmap from GPU
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
         !$omp target exit data map(delete: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
         !$omp target exit data map(delete: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
@@ -453,6 +464,7 @@ contains
         !$omp target exit data map(delete: CS%Del2vort_q)
         !$omp target exit data map(delete: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
         !$omp target exit data map(delete: CS%grad_div_mag_h, CS%grad_div_mag_q)
+#endif
 
         ! Deallocate arrays
         if (allocated(CS%Kh_bg_xx)) deallocate (CS%Kh_bg_xx)
@@ -652,7 +664,9 @@ contains
             !=====================================================================
             if (CS%Leith_Kh) then
                 ! Transfer velocity gradients from GPU to CPU
+#ifdef __NVCOMPILER_LLVM__
                 !$omp target update from(CS%dvdx, CS%dudy, CS%dudx, CS%dvdy)
+#endif
 
                 ! Calculate vorticity at q-points (CPU)
                 if (CS%no_slip) then
@@ -752,9 +766,13 @@ contains
                 end do
 
                 ! Transfer Leith data back to GPU
+#ifdef __NVCOMPILER_LLVM__
                 !$omp target update to(CS%vert_vort_mag, CS%grad_vort_mag_q)
+#endif
                 if (CS%Leith_Ah) then
+#ifdef __NVCOMPILER_LLVM__
                     !$omp target update to(CS%Del2vort_q)
+#endif
                 end if
             end if
 
@@ -1051,7 +1069,9 @@ contains
             ! STEP 15: Compute friction work (after diffu/diffv)
             !=====================================================================
             if (CS%compute_FrictWork .and. present(FrictWork)) then
+#ifdef __NVCOMPILER_LLVM__
                 !$omp target update from(CS%str_xx, CS%str_xy)
+#endif
                 do j = js, je
                     do i = is, ie
                         FrictWork(i, j, k) = ( &

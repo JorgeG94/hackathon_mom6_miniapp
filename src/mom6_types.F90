@@ -154,12 +154,14 @@ contains
         allocate (G%mask2dCv(G%isd:G%ied, G%jsd:G%jed))
 
         ! Initialize uniform grid metrics
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
         !$omp target enter data map(alloc: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target enter data map(alloc: G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target enter data map(alloc: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
         !$omp target enter data map(alloc: G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+#endif
 
         ! Beta-plane Coriolis: f = f0 + beta*y
         f0 = 2.0_dp*OMEGA*sin(lat_deg*3.14159265358979_dp/180.0_dp)
@@ -204,12 +206,14 @@ contains
         end do
 
         ! Copy grid data from host to device
+#ifdef __NVCOMPILER_LLVM__
         !$omp target update to(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$omp target update to(G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
         !$omp target update to(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target update to(G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target update to(G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
         !$omp target update to(G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+#endif
 
         G%first_direction = 0
 
@@ -219,12 +223,14 @@ contains
     subroutine end_ocean_grid(G)
         type(ocean_grid_type), intent(inout) :: G
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$omp target exit data map(delete: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
         !$omp target exit data map(delete: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target exit data map(delete: G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target exit data map(delete: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
         !$omp target exit data map(delete: G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+#endif
 
         if (allocated(G%IareaT)) deallocate (G%IareaT)
         if (allocated(G%areaT)) deallocate (G%areaT)

@@ -70,6 +70,10 @@ else ifneq (,$(findstring flang-new,$(FC)))
     LDFLAGS = -fopenmp
   endif
   MODFLAG = -J
+else ifneq (,$(findstring lfortran,$(FC)))
+  FFLAGS = -O3 --cpp --openmp
+  LDFLAGS = 
+  MODFLAG = -J
 else
   # Default flags
   FFLAGS = -O3

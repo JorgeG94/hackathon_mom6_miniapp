@@ -102,12 +102,14 @@ contains
         allocate (CS%uhbt_av(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%vhbt_av(G%isd:G%ied, G%jsd:G%jed))
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%eta, CS%eta_pred, CS%ubt, CS%vbt)
         !$omp target enter data map(alloc: CS%ubt_prev, CS%vbt_prev, CS%uhbt, CS%vhbt)
         !$omp target enter data map(alloc: CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
         !$omp target enter data map(alloc: CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
         !$omp target enter data map(alloc: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
         !$omp target enter data map(alloc: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+#endif
 
         ! Initialize grid-related arrays
         do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -144,12 +146,14 @@ contains
 
         if (.not. CS%initialized) return
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%eta, CS%eta_pred, CS%ubt, CS%vbt)
         !$omp target exit data map(delete: CS%ubt_prev, CS%vbt_prev, CS%uhbt, CS%vhbt)
         !$omp target exit data map(delete: CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
         !$omp target exit data map(delete: CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
         !$omp target exit data map(delete: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
         !$omp target exit data map(delete: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+#endif
 
         if (allocated(CS%eta)) deallocate (CS%eta)
         if (allocated(CS%eta_pred)) deallocate (CS%eta_pred)

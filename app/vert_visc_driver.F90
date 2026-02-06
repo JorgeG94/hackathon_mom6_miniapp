@@ -68,7 +68,9 @@ program vert_visc_driver
     allocate (u_init(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (v_init(G%isd:G%ied, G%jsd:G%jed, nk))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: u, v, h, u_init, v_init)
+#endif
 
     ! Initialize state with vertical shear profile
     ! Surface-intensified flow that should be smoothed by viscosity
@@ -86,7 +88,9 @@ program vert_visc_driver
         v(i, j, k) = v_init(i, j, k)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target update to(u, v, h)
+#endif
 
     print '(A)', ''
     print '(A)', 'Running vertical viscosity solver...'
@@ -102,7 +106,9 @@ program vert_visc_driver
             u(i, j, k) = u_init(i, j, k)
             v(i, j, k) = v_init(i, j, k)
         end do
+#ifdef __NVCOMPILER_LLVM__
         !$omp target update to(u, v)
+#endif
 
         ! Compute coefficients (uses find_coupling_coef internally)
         t_start = omp_get_wtime()
@@ -125,8 +131,10 @@ program vert_visc_driver
 
     t_total = t_coef + t_remnant + t_apply
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: u, v)
     !$omp target exit data map(delete: h, u_init, v_init)
+#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

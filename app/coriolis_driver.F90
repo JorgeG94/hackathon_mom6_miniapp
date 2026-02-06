@@ -78,7 +78,9 @@ program coriolis_driver
     allocate (CAu(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (CAv(G%isd:G%ied, G%jsd:G%jed, nk))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: u, v, h, uh, vh, CAu, CAv)
+#endif
 
     ! Initialize state with realistic patterns
     do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -91,7 +93,9 @@ program coriolis_driver
         vh(i, j, k) = v(i, j, k)*h(i, j, k)*G%dxCv(i, j)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target update to(u, v, h, uh, vh)
+#endif
 
     print '(A)', ''
     print '(A)', 'Running Coriolis solver...'
@@ -106,8 +110,10 @@ program coriolis_driver
         t_total = t_total + (t_end - t_start)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: CAu, CAv)
     !$omp target exit data map(delete: u, v, h, uh, vh)
+#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

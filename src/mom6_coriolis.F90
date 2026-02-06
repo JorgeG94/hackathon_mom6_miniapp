@@ -71,9 +71,11 @@ contains
         allocate (CS%c(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%d(G%isd:G%ied, G%jsd:G%jed))
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort)
         !$omp target enter data map(alloc: CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, CS%Area_q)
         !$omp target enter data map(alloc: CS%KE, CS%a, CS%b, CS%c, CS%d)
+#endif
 
         ! Precompute Area_q (sum of 4 neighboring h-cell areas)
         do concurrent(j=G%jsd:G%jed - 1, i=G%isd:G%ied - 1)
@@ -91,9 +93,11 @@ contains
 
         if (.not. CS%initialized) return
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort)
         !$omp target exit data map(delete: CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, CS%Area_q)
         !$omp target exit data map(delete: CS%KE, CS%a, CS%b, CS%c, CS%d)
+#endif
 
         if (allocated(CS%dvdx)) deallocate (CS%dvdx)
         if (allocated(CS%dudy)) deallocate (CS%dudy)

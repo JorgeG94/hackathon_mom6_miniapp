@@ -91,8 +91,10 @@ contains
         allocate (CS%visc_rem_u(G%isd:G%ied, G%jsd:G%jed, nz))
         allocate (CS%visc_rem_v(G%isd:G%ied, G%jsd:G%jed, nz))
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%a_u, CS%a_v, CS%h_u, CS%h_v)
         !$omp target enter data map(alloc: CS%visc_rem_u, CS%visc_rem_v)
+#endif
 
         CS%initialized = .true.
 
@@ -104,8 +106,10 @@ contains
 
         if (.not. CS%initialized) return
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%a_u, CS%a_v, CS%h_u, CS%h_v)
         !$omp target exit data map(delete: CS%visc_rem_u, CS%visc_rem_v)
+#endif
 
         if (allocated(CS%a_u)) deallocate (CS%a_u)
         if (allocated(CS%a_v)) deallocate (CS%a_v)

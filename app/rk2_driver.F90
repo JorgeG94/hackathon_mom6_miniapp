@@ -182,9 +182,11 @@ program rk2_driver
     allocate (vbt_av(G%isd:G%ied, G%jsd:G%jed))
     allocate (eta_av(G%isd:G%ied, G%jsd:G%jed))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: u, v, h, h0, uh, vh, CAu, CAv, up, vp, htmp)
     !$omp target enter data map(alloc: diffu, diffv)
     !$omp target enter data map(alloc: eta, ubt, vbt, ubt_av, vbt_av, eta_av)
+#endif
 
     ! Initialize state
     call initialize_state(u, v, h, h0, eta, ubt, vbt, G, GV)
@@ -278,7 +280,9 @@ program rk2_driver
             if (id_diffu_sum > 0 .or. id_diffv_sum > 0) then
                 call profiler_start("Diagnostics")
                 t_start = omp_get_wtime()
+#ifdef __NVCOMPILER_LLVM__
                 !$omp target update from(diffu, diffv, h)
+#endif
                 call post_product_sum_u(id_diffu_sum, diffu, h, G, nk, diag_CS)
                 call post_product_sum_v(id_diffv_sum, diffv, h, G, nk, diag_CS)
                 t_end = omp_get_wtime()
@@ -353,7 +357,9 @@ program rk2_driver
             if (iter == niter .and. (id_KE > 0 .or. id_mass > 0)) then
                 call profiler_start("Diagnostics")
                 t_start = omp_get_wtime()
+#ifdef __NVCOMPILER_LLVM__
                 !$omp target update from(u, v, h)
+#endif
                 call compute_and_post_KE(id_KE, u, v, h, G, GV, diag_CS)
                 call compute_and_post_mass(id_mass, h, G, GV, diag_CS)
                 t_end = omp_get_wtime()
@@ -371,13 +377,17 @@ program rk2_driver
 
     ! Copy results back from device and delete temporary device arrays
     call profiler_start("D2H_copy_results")
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: h, u, v, eta, h0)
+#endif
     call profiler_stop("D2H_copy_results")
 
     call profiler_start("GPU_dealloc_temps")
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(delete: uh, vh, CAu, CAv, up, vp)
     !$omp target exit data map(delete: diffu, diffv)
     !$omp target exit data map(delete: ubt, vbt, ubt_av, vbt_av, eta_av)
+#endif
     call profiler_stop("GPU_dealloc_temps")
 
     print '(A)', '=================================================='

@@ -164,12 +164,12 @@ contains
         h_min = 0.0_dp; if (present(hmin)) h_min = hmin
 
         if (present(hin)) then
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
                     h(i, j, k) = max(hin(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
-                end do; end do; end do
+            end do; end do; end do
         else
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
                     h(i, j, k) = max(h(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
                 end do; end do; end do
@@ -199,7 +199,7 @@ contains
         nz = GV%ke
 
         if (CS%upwind_1st) then
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, nz
                 do j = jsh, jeh
                     do i = ish - 1, ieh + 1
@@ -209,7 +209,7 @@ contains
                 end do
             end do
         else
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, nz
                 call PPM_reconstruction_x(h_in(:, :, k), h_W(:, :, k), h_E(:, :, k), G, &
                                           2.0*GV%Angstrom_H, CS%monotonic, CS%simple_2nd)
@@ -645,7 +645,7 @@ contains
         jeh = G%jec
         nz = GV%ke
 
-        !$OMP parallel do default(shared) private(CFL,curv_3,h_marg,h_avg)
+        !$OMP parallel do private(CFL,curv_3,h_marg,h_avg)
         do k = 1, nz
             do j = jsh, jeh
                 do I = ish - 1, ieh
@@ -689,7 +689,7 @@ contains
             ! Scale back the thickness to account for the effects of viscosity and the fractional open
             ! thickness to give an appropriate non-normalized weight for each layer in determining the
             ! barotropic acceleration.
-            !$OMP parallel do default(shared)
+            !$OMP parallel do
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh
@@ -698,7 +698,7 @@ contains
                 end do
             end do
         else
-            !$OMP parallel do default(shared)
+            !$OMP parallel do
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh

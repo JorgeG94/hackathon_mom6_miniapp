@@ -177,8 +177,10 @@ program hor_visc_driver
     allocate (vh(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (FrictWork(G%isd:G%ied, G%jsd:G%jed, nk))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: u, v, h, u_init, v_init, diffu, diffv)
     !$omp target enter data map(alloc: uh, vh, FrictWork)
+#endif
 
     ! Initialize state with horizontal structure that should be smoothed
     ! Use different patterns to exercise different viscosity schemes
@@ -210,7 +212,9 @@ program hor_visc_driver
         v(i, j, k) = v_init(i, j, k)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target update to(u, v, h)
+#endif
 
     ! Compute simple transports: uh = u * 0.5*(h(i,j) + h(i+1,j)) * dy
     do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -218,7 +222,9 @@ program hor_visc_driver
         vh(i, j, k) = v(i, j, k)*0.5_dp*(h(i, j, k) + h(i, min(j + 1, G%jed), k))*G%dxCv(i, j)
     end do
     FrictWork = 0.0_dp
+#ifdef __NVCOMPILER_LLVM__
     !$omp target update to(uh, vh)
+#endif
 
     print '(A)', ''
     print '(A)', 'Running horizontal viscosity solver...'
@@ -231,7 +237,9 @@ program hor_visc_driver
             u(i, j, k) = u_init(i, j, k)
             v(i, j, k) = v_init(i, j, k)
         end do
+#ifdef __NVCOMPILER_LLVM__
         !$omp target update to(u, v)
+#endif
 
         ! Compute horizontal viscous accelerations
         t_start = omp_get_wtime()
@@ -240,8 +248,10 @@ program hor_visc_driver
         t_total = t_total + (t_end - t_start)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: u, v, diffu, diffv, FrictWork)
     !$omp target exit data map(delete: h, u_init, v_init, uh, vh)
+#endif
 
     print '(A)', ''
     print '(A)', '=================================================================='

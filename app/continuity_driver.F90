@@ -57,7 +57,9 @@ program continuity_driver
     allocate (u(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (uh(G%isd:G%ied, G%jsd:G%jed, nk))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: h, hin, u, uh)
+#endif
 
     ! Initialize state
     do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -88,8 +90,10 @@ program continuity_driver
         t_total = t_total + (t_end - t_start)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: h)
     !$omp target exit data map(delete: hin, u, uh, uhbt, u_cor, du_cor)
+#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

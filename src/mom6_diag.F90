@@ -103,7 +103,9 @@ contains
         CS%work_sum = 0.0_dp
 
         ! Map to GPU
+#ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%work_2d, CS%work_sum)
+#endif
 
         ! Initialize timing
         CS%total_time = 0.0_dp
@@ -121,7 +123,9 @@ contains
 
         if (.not. CS%initialized) return
 
+#ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%work_2d, CS%work_sum)
+#endif
 
         if (allocated(CS%work_2d)) deallocate (CS%work_2d)
         if (allocated(CS%work_sum)) deallocate (CS%work_sum)
@@ -191,8 +195,7 @@ contains
         cnt = 0
 
         ! Use explicit loops with reduction for GPU compatibility
-        !$omp parallel do collapse(2) reduction(min:fmin) reduction(max:fmax) &
-        !$omp reduction(+:fmean,frms,cnt) private(i,j)
+        !$omp parallel do collapse(2) reduction(min:fmin) reduction(max:fmax) reduction(+:fmean,frms,cnt) private(i,j)
         do j = G%jsc, G%jec
             do i = G%isc, G%iec
                 fmin = min(fmin, field(i, j))
@@ -250,8 +253,7 @@ contains
         cnt = 0
 
         ! Use explicit loops with reduction for GPU compatibility
-        !$omp parallel do collapse(3) reduction(min:fmin) reduction(max:fmax) &
-        !$omp reduction(+:fmean,frms,cnt) private(i,j,k)
+        !$omp parallel do collapse(3) reduction(min:fmin) reduction(max:fmax) reduction(+:fmean,frms,cnt) private(i,j,k)
         do k = 1, nz
             do j = G%jsc, G%jec
                 do i = G%isc, G%iec

@@ -56,7 +56,9 @@ program barotropic_driver
     allocate (eta_av(G%isd:G%ied, G%jsd:G%jed))
     allocate (eta_init(G%isd:G%ied, G%jsd:G%jed))
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target enter data map(alloc: eta_in, ubt_in, vbt_in, u_av, v_av, eta_av)
+#endif
 
     ! Initialize state with realistic patterns
     do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -69,7 +71,9 @@ program barotropic_driver
         vbt_in(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target update to(eta_in, ubt_in, vbt_in)
+#endif
 
     print '(A)', ''
     print '(A)', 'Running barotropic solver...'
@@ -81,7 +85,9 @@ program barotropic_driver
         do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
             eta_in(i, j) = eta_init(i, j)
         end do
+#ifdef __NVCOMPILER_LLVM__
         !$omp target update to(eta_in)
+#endif
 
         t_start = omp_get_wtime()
         call btstep(eta_in, ubt_in, vbt_in, u_av, v_av, eta_av, G, CS)
@@ -90,8 +96,10 @@ program barotropic_driver
         t_total = t_total + (t_end - t_start)
     end do
 
+#ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: u_av, v_av, eta_av)
     !$omp target exit data map(delete: eta_in, ubt_in, vbt_in)
+#endif
 
     print '(A)', ''
     print '(A)', '=================================================='
