@@ -19,7 +19,8 @@ program rk2_driver
    use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
    use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                         init_verticalGrid, end_ocean_grid, G_EARTH
+                         init_verticalGrid, end_ocean_grid, G_EARTH, BT_cont_type, &
+                         alloc_BT_cont_type
    use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
    use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                             SADOURNY75_ENERGY
@@ -45,23 +46,30 @@ program rk2_driver
    type(vert_visc_CS) :: visc_CS
    type(hor_visc_CS) :: hvisc_CS
    type(diag_ctrl) :: diag_CS
+   type(BT_cont_type), pointer :: BT_cont
 
    ! Diagnostic IDs
    integer :: id_KE, id_diffu_sum, id_diffv_sum, id_mass
 
    ! 3D state variables
    real(dp), allocatable :: u(:, :, :), v(:, :, :)       ! Velocities
+   real(dp), allocatable :: u_cor(:, :, :)
    real(dp), allocatable :: h(:, :, :), h0(:, :, :)      ! Layer thickness (current, initial)
    real(dp), allocatable :: uh(:, :, :), vh(:, :, :)     ! Layer transports
    real(dp), allocatable :: CAu(:, :, :), CAv(:, :, :)   ! Coriolis accelerations
    real(dp), allocatable :: up(:, :, :), vp(:, :, :)     ! Predictor velocities
    real(dp), allocatable :: diffu(:, :, :), diffv(:, :, :)  ! Horizontal viscous accelerations
+   real(dp), allocatable :: por_face_areaU(:, :, :)
+   real(dp), allocatable :: visc_rem_u(:, :, :)
+   real(dp), allocatable :: htmp(:, :, :) ! temporary thickness
 
    ! 2D barotropic variables
    real(dp), allocatable :: eta(:, :)                 ! Sea surface height
    real(dp), allocatable :: ubt(:, :), vbt(:, :)       ! Barotropic velocities
+   real(dp), allocatable :: uhbt(:, :)
    real(dp), allocatable :: ubt_av(:, :), vbt_av(:, :)  ! Time-averaged BT velocities
    real(dp), allocatable :: eta_av(:, :)              ! Time-averaged SSH
+   real(dp), allocatable :: du_cor(:, :)
 
    ! Timing
    real(dp) :: dt, t_start, t_end, t_total
@@ -121,7 +129,8 @@ program rk2_driver
    ! Initialize grids and control structures
    call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
    call init_verticalGrid(GV, nk)
-   call continuity_init(cont_CS, G, GV)
+   call continuity_init(cont_CS, G, GV, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
+   call alloc_BT_cont_type(BT_cont, G, GV)
    call coriolis_init(cor_CS, G, SADOURNY75_ENERGY)
    call barotropic_init(bt_CS, G, dt, bt_nsteps)
    call vert_visc_init(visc_CS, G, GV, Kv=1.0e-4_dp, Kv_ml=1.0e-2_dp, Hmix=50.0_dp)
@@ -155,6 +164,7 @@ program rk2_driver
    allocate (v(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (h(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (h0(G%isd:G%ied, G%jsd:G%jed, nk))
+   allocate (htmp(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (uh(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (vh(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (CAu(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -172,7 +182,7 @@ program rk2_driver
    allocate (vbt_av(G%isd:G%ied, G%jsd:G%jed))
    allocate (eta_av(G%isd:G%ied, G%jsd:G%jed))
 
-   !$omp target enter data map(alloc: u, v, h, h0, uh, vh, CAu, CAv, up, vp)
+   !$omp target enter data map(alloc: u, v, h, h0, uh, vh, CAu, CAv, up, vp, htmp)
    !$omp target enter data map(alloc: diffu, diffv)
    !$omp target enter data map(alloc: eta, ubt, vbt, ubt_av, vbt_av, eta_av)
 
@@ -258,7 +268,8 @@ program rk2_driver
          ! 7. Continuity (update thicknesses)
          call profiler_start("Continuity")
          t_start = omp_get_wtime()
-         call continuity_PPM(up, vp, h0, h, uh, vh, dt, G, GV, cont_CS, x_first=.true.)
+         call continuity_PPM(up, h0, h, uh, dt, G, GV, cont_CS, por_face_areaU, uhbt, &
+            visc_rem_u, u_cor, BT_cont, du_cor)
          t_end = omp_get_wtime()
          t_continuity = t_continuity + (t_end - t_start)
          call profiler_stop("Continuity")
@@ -330,7 +341,10 @@ program rk2_driver
          ! 14. Final continuity
          call profiler_start("Continuity")
          t_start = omp_get_wtime()
-         call continuity_PPM(u, v, h, h, uh, vh, 0.5_dp*dt, G, GV, cont_CS, x_first=.false.)
+         do concurrent (k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%jed)
+            htmp(i,j,k) = h(i,j,k)
+         enddo
+         call continuity_PPM(u, htmp, h, uh, 0.5_dp*dt, G, GV, cont_CS, por_face_areaU, uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
          t_end = omp_get_wtime()
          t_continuity = t_continuity + (t_end - t_start)
          call profiler_stop("Continuity")
@@ -386,7 +400,7 @@ program rk2_driver
 
    ! Cleanup - each _end() call deallocates device memory
    call profiler_start("Finalize_continuity")
-   call continuity_end(cont_CS)
+   call continuity_end(cont_CS, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
    call profiler_stop("Finalize_continuity")
 
    call profiler_start("Finalize_coriolis")

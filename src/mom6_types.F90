@@ -11,6 +11,7 @@ module mom6_types
    public :: ocean_grid_type, verticalGrid_type
    public :: G_EARTH, RHO_0, OMEGA
    public :: init_ocean_grid, end_ocean_grid, init_verticalGrid
+   public :: BT_cont_type, alloc_BT_cont_type
 
    !> Ocean grid structure (simplified from MOM6's ocean_grid_type)
    type :: ocean_grid_type
@@ -31,6 +32,7 @@ module mom6_types
       real(dp), allocatable :: dyCu(:, :)     ! dy at u-points [L]
       real(dp), allocatable :: IdxCu(:, :)    ! Inverse dx at u-points [L-1]
       real(dp), allocatable :: IdyCu(:, :)    ! Inverse dy at u-points [L-1]
+      real(dp), allocatable :: dy_Cu(:, :)    ! The unblocked lengths of the u-faces of the h-cell
       real(dp), allocatable :: dxCv(:, :)     ! dx at v-points [L]
       real(dp), allocatable :: dyCv(:, :)     ! dy at v-points [L]
       real(dp), allocatable :: IdxCv(:, :)    ! Inverse dx at v-points [L-1]
@@ -70,6 +72,28 @@ module mom6_types
    real(dp), parameter :: RHO_0 = 1035.0_dp    ! Reference density [kg m-3]
    real(dp), parameter :: OMEGA = 7.2921e-5_dp  ! Earth rotation rate [s-1]
 
+   !> Container for information about the summed layer transports
+   !! and how they will vary as the barotropic velocity is changed.
+   type :: BT_cont_type
+   real(dp), allocatable :: FA_u_EE(:,:) !< The effective open face area for zonal barotropic transport
+                                       !! drawing from locations far to the east [H L ~> m2 or kg m-1].
+   real(dp), allocatable :: FA_u_E0(:,:) !< The effective open face area for zonal barotropic transport
+                                       !! drawing from nearby to the east [H L ~> m2 or kg m-1].
+   real(dp), allocatable :: FA_u_W0(:,:) !< The effective open face area for zonal barotropic transport
+                                       !! drawing from nearby to the west [H L ~> m2 or kg m-1].
+   real(dp), allocatable :: FA_u_WW(:,:) !< The effective open face area for zonal barotropic transport
+                                       !! drawing from locations far to the west [H L ~> m2 or kg m-1].
+   real(dp), allocatable :: uBT_WW(:,:)  !< uBT_WW is the barotropic velocity [L T-1 ~> m s-1], beyond which the
+                                       !! marginal open face area is FA_u_WW.  uBT_WW must be non-negative.
+   real(dp), allocatable :: uBT_EE(:,:)  !< uBT_EE is a barotropic velocity [L T-1 ~> m s-1], beyond which the
+                                       !! marginal open face area is FA_u_EE. uBT_EE must be non-positive.
+   real(dp), allocatable :: h_u(:,:,:)   !< An effective thickness at zonal faces, taking into account the effects
+                                       !! of vertical viscosity and fractional open areas [H ~> m or kg m-2].
+                                       !! This is primarily used as a non-normalized weight in determining
+                                       !! the depth averaged accelerations for the barotropic solver.
+   ! would also have equivalent variables for meridional, but those are ignored for this example
+   end type BT_cont_type
+
 contains
 
    !> Initialize the ocean grid with uniform spacing
@@ -90,8 +114,8 @@ contains
       ! With halo of 1: index 1 = halo, 2:n+1 = computational, n+2 = halo
       G%isd = 1; G%ied = ni + 2
       G%jsd = 1; G%jed = nj + 2
-      G%isc = 2; G%iec = ni + 1
-      G%jsc = 2; G%jec = nj + 1
+      G%isc = G%isd + 3; G%iec = G%ied - 3
+      G%jsc = G%jsd + 3; G%jec = G%jed - 3
 
       ! Grid spacing
       dx_m = dx_km*1000.0_dp
@@ -107,6 +131,7 @@ contains
       allocate (G%IdyT(G%isd:G%ied, G%jsd:G%jed))
       allocate (G%dxCu(G%isd:G%ied, G%jsd:G%jed))
       allocate (G%dyCu(G%isd:G%ied, G%jsd:G%jed))
+      allocate (G%dy_Cu(G%isd:G%ied, G%jsd:G%jed))
       allocate (G%IdxCu(G%isd:G%ied, G%jsd:G%jed))
       allocate (G%IdyCu(G%isd:G%ied, G%jsd:G%jed))
       allocate (G%dxCv(G%isd:G%ied, G%jsd:G%jed))
@@ -241,5 +266,44 @@ contains
       GV%Angstrom_H = 1.0e-10_dp
 
    end subroutine init_verticalGrid
+
+!> Allocates the arrays contained within a BT_cont_type and initializes them to 0.
+subroutine alloc_BT_cont_type(BT_cont, G, GV)
+  type(BT_cont_type),      pointer    :: BT_cont !< The BT_cont_type whose elements will be allocated
+  type(ocean_grid_type),   intent(in) :: G    !< The ocean's grid structure
+  type(verticalGrid_type), intent(in) :: GV   !< The ocean's vertical grid structure.
+  integer :: isd, ied, jsd, jed, nz
+  isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed ; nz = GV%ke
+
+  allocate(BT_cont)
+  allocate(BT_cont%FA_u_WW(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+  allocate(BT_cont%FA_u_W0(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+  allocate(BT_cont%FA_u_E0(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+  allocate(BT_cont%FA_u_EE(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+  allocate(BT_cont%uBT_WW(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+  allocate(BT_cont%uBT_EE(G%isd:G%ied,G%jsd:G%jed), source=0._dp)
+
+  allocate(BT_cont%h_u(isd:ied,jsd:jed,1:nz), source=0._dp)
+
+end subroutine alloc_BT_cont_type
+
+!> Deallocates the arrays contained within a BT_cont_type.
+subroutine dealloc_BT_cont_type(BT_cont)
+  type(BT_cont_type), pointer :: BT_cont !< The BT_cont_type whose elements will be deallocated.
+
+  if (.not.associated(BT_cont)) return
+
+  if (allocated(BT_cont%FA_u_WW)) deallocate(BT_cont%FA_u_WW)
+  if (allocated(BT_cont%FA_u_W0)) deallocate(BT_cont%FA_u_W0)
+  if (allocated(BT_cont%FA_u_E0)) deallocate(BT_cont%FA_u_E0)
+  if (allocated(BT_cont%FA_u_EE)) deallocate(BT_cont%FA_u_EE)
+  if (allocated(BT_cont%uBT_WW)) deallocate(BT_cont%uBT_WW)
+  if (allocated(BT_cont%uBT_EE)) deallocate(BT_cont%uBT_EE)
+  if (allocated(BT_cont%h_u)) deallocate(BT_cont%h_u)
+
+  deallocate(BT_cont)
+
+end subroutine dealloc_BT_cont_type
+
 
 end module mom6_types

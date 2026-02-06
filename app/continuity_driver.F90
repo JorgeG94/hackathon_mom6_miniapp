@@ -3,16 +3,17 @@ program continuity_driver
    use omp_lib, only: omp_get_wtime
    use iso_fortran_env, only: dp => real64
    use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                         init_verticalGrid, end_ocean_grid
+                         init_verticalGrid, end_ocean_grid, BT_cont_type, alloc_BT_cont_type
    use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
    implicit none
 
    type(ocean_grid_type) :: G
    type(verticalGrid_type) :: GV
    type(continuity_CS) :: CS
+   type(BT_cont_type), pointer :: BT_cont
 
-   real(dp), allocatable :: h(:, :, :), hin(:, :, :), u(:, :, :), v(:, :, :)
-   real(dp), allocatable :: uh(:, :, :), vh(:, :, :)
+   real(dp), allocatable :: h(:, :, :), hin(:, :, :), u(:, :, :), por_face_areaU(:, :, :), visc_rem_u(:, :, :)
+   real(dp), allocatable :: uh(:, :, :), uhbt(:, :), u_cor(:, :, :), du_cor(:, :)
 
    real(dp) :: dt, t_start, t_end, t_total
    integer :: ni, nj, nk, niter, iter, i, j, k
@@ -45,7 +46,8 @@ program continuity_driver
    ! Initialize grid
    call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
    call init_verticalGrid(GV, nk)
-   call continuity_init(CS, G, GV)
+   call continuity_init(CS, G, GV, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
+   call alloc_BT_cont_type(BT_cont, G, GV)
 
    dt = 300.0_dp  ! 5 minute timestep
 
@@ -53,11 +55,9 @@ program continuity_driver
    allocate (h(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (hin(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (u(G%isd:G%ied, G%jsd:G%jed, nk))
-   allocate (v(G%isd:G%ied, G%jsd:G%jed, nk))
    allocate (uh(G%isd:G%ied, G%jsd:G%jed, nk))
-   allocate (vh(G%isd:G%ied, G%jsd:G%jed, nk))
 
-   !$omp target enter data map(alloc: h, hin, u, v, uh, vh)
+   !$omp target enter data map(alloc: h, hin, u, uh)
 
    ! Initialize state
    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
@@ -65,8 +65,10 @@ program continuity_driver
                      cos(real(j - 1, dp)/real(nj, dp)*3.14159_dp)*exp(-real(k, dp)/20.0_dp)
       h(i, j, k) = hin(i, j, k)
       u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)*exp(-real(k, dp)/30.0_dp)
-      v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp*2.0_dp)*exp(-real(k, dp)/30.0_dp)
    end do
+
+   print *, G%jsc, G%jec, G%isc, G%iec
+      print *, sum(hin(G%isc:G%iec, G%jsc:G%jec, :)), sum(h(G%isc:G%iec, G%jsc:G%jec, :))
 
    print '(A)', ''
    print '(A)', 'Running continuity solver...'
@@ -80,14 +82,14 @@ program continuity_driver
       end do
 
       t_start = omp_get_wtime()
-      call continuity_PPM(u, v, hin, h, uh, vh, dt, G, GV, CS, x_first=.true.)
+      call continuity_PPM(u, hin, h, uh, dt, G, GV, CS, por_face_areaU, uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
       t_end = omp_get_wtime()
 
       t_total = t_total + (t_end - t_start)
    end do
 
    !$omp target exit data map(from: h)
-   !$omp target exit data map(delete: hin, u, v, uh, vh)
+   !$omp target exit data map(delete: hin, u, uh, uhbt, u_cor, du_cor)
 
    print '(A)', ''
    print '(A)', '=================================================='
@@ -99,9 +101,9 @@ program continuity_driver
    call verify_mass(hin, h, G, GV)
 
    ! Cleanup
-   call continuity_end(CS)
+   call continuity_end(CS, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
    call end_ocean_grid(G)
-   deallocate (h, hin, u, v, uh, vh)
+   deallocate (h, hin, u, uh)
 
 contains
 
