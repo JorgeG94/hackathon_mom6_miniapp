@@ -37,6 +37,8 @@ program hor_visc_driver
     real(dp), allocatable :: u(:, :, :), v(:, :, :), h(:, :, :)
     real(dp), allocatable :: u_init(:, :, :), v_init(:, :, :)
     real(dp), allocatable :: diffu(:, :, :), diffv(:, :, :)
+    real(dp), allocatable :: uh(:, :, :), vh(:, :, :)
+    real(dp), allocatable :: FrictWork(:, :, :)
 
     real(dp) :: t_start, t_end, t_total
     real(dp) :: Kh, Ah
@@ -161,6 +163,7 @@ program hor_visc_driver
                        Leith=use_leith, &
                        no_slip=use_no_slip, &
                        better_bound=use_better_bound)
+    CS%compute_FrictWork = .true.
 
     ! Allocate state arrays
     allocate (u(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -170,8 +173,12 @@ program hor_visc_driver
     allocate (v_init(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (diffu(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (diffv(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate (uh(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate (vh(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate (FrictWork(G%isd:G%ied, G%jsd:G%jed, nk))
 
     !$omp target enter data map(alloc: u, v, h, u_init, v_init, diffu, diffv)
+    !$omp target enter data map(alloc: uh, vh, FrictWork)
 
     ! Initialize state with horizontal structure that should be smoothed
     ! Use different patterns to exercise different viscosity schemes
@@ -205,6 +212,14 @@ program hor_visc_driver
 
     !$omp target update to(u, v, h)
 
+    ! Compute simple transports: uh = u * 0.5*(h(i,j) + h(i+1,j)) * dy
+    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+        uh(i, j, k) = u(i, j, k)*0.5_dp*(h(i, j, k) + h(min(i + 1, G%ied), j, k))*G%dyCu(i, j)
+        vh(i, j, k) = v(i, j, k)*0.5_dp*(h(i, j, k) + h(i, min(j + 1, G%jed), k))*G%dxCv(i, j)
+    end do
+    FrictWork = 0.0_dp
+    !$omp target update to(uh, vh)
+
     print '(A)', ''
     print '(A)', 'Running horizontal viscosity solver...'
 
@@ -220,13 +235,13 @@ program hor_visc_driver
 
         ! Compute horizontal viscous accelerations
         t_start = omp_get_wtime()
-        call hor_visc(u, v, h, diffu, diffv, G, GV, CS)
+        call hor_visc(u, v, h, diffu, diffv, G, GV, CS, uh, vh, FrictWork)
         t_end = omp_get_wtime()
         t_total = t_total + (t_end - t_start)
     end do
 
-    !$omp target exit data map(from: u, v, diffu, diffv)
-    !$omp target exit data map(delete: h, u_init, v_init)
+    !$omp target exit data map(from: u, v, diffu, diffv, FrictWork)
+    !$omp target exit data map(delete: h, u_init, v_init, uh, vh)
 
     print '(A)', ''
     print '(A)', '=================================================================='
@@ -237,12 +252,12 @@ program hor_visc_driver
     print '(A)', '=================================================================='
 
     ! Verify viscous accelerations
-    call verify_hor_visc(u_init, v_init, diffu, diffv, G, GV, CS)
+    call verify_hor_visc(u_init, v_init, diffu, diffv, FrictWork, G, GV, CS)
 
     ! Cleanup
     call hor_visc_end(CS)
     call end_ocean_grid(G)
-    deallocate (u, v, h, u_init, v_init, diffu, diffv)
+    deallocate (u, v, h, u_init, v_init, diffu, diffv, uh, vh, FrictWork)
 
 contains
 
@@ -277,21 +292,24 @@ contains
         print '(A)', 'explicit data transfers, representing real MOM6 porting challenges.'
     end subroutine print_help
 
-    subroutine verify_hor_visc(u, v, diffu, diffv, G, GV, CS)
+    subroutine verify_hor_visc(u, v, diffu, diffv, FrictWork, G, GV, CS)
         type(ocean_grid_type), intent(in) :: G
         type(verticalGrid_type), intent(in) :: GV
         type(hor_visc_CS), intent(in) :: CS
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u, v
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: diffu, diffv
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: FrictWork
 
         real(dp) :: max_u, max_v, max_diffu, max_diffv
         real(dp) :: avg_diffu, avg_diffv, rms_diffu, rms_diffv
+        real(dp) :: max_FW, avg_FW
         integer :: i, j, k, cnt
 
         max_u = 0.0_dp; max_v = 0.0_dp
         max_diffu = 0.0_dp; max_diffv = 0.0_dp
         avg_diffu = 0.0_dp; avg_diffv = 0.0_dp
         rms_diffu = 0.0_dp; rms_diffv = 0.0_dp
+        max_FW = 0.0_dp; avg_FW = 0.0_dp
         cnt = 0
 
         ! Compute statistics
@@ -313,6 +331,12 @@ contains
                     cnt = cnt + 1
                 end do
             end do
+            do j = G%jsc, G%jec
+                do i = G%isc, G%iec
+                    max_FW = max(max_FW, abs(FrictWork(i, j, k)))
+                    avg_FW = avg_FW + FrictWork(i, j, k)
+                end do
+            end do
         end do
 
         if (cnt > 0) then
@@ -320,6 +344,7 @@ contains
             avg_diffv = avg_diffv/real(cnt, dp)
             rms_diffu = sqrt(rms_diffu/real(cnt, dp))
             rms_diffv = sqrt(rms_diffv/real(cnt, dp))
+            avg_FW = avg_FW/real(cnt, dp)
         end if
 
         print '(A)', ''
@@ -331,6 +356,8 @@ contains
         if (CS%Smagorinsky_Kh) print '(A)', '  - Smagorinsky for Kh'
         if (CS%Smagorinsky_Ah) print '(A)', '  - Smagorinsky for Ah'
         if (CS%Leith_Kh) print '(A)', '  - Leith vorticity gradient (CPU-only)'
+        if (CS%Leith_Ah) print '(A)', '  - Leith biharmonic viscosity'
+        if (CS%compute_FrictWork) print '(A)', '  - Friction work computation'
         if (CS%no_slip) print '(A)', '  - No-slip boundary conditions'
         if (CS%better_bound_Kh) print '(A)', '  - Thickness-aware Kh bounding'
         if (CS%better_bound_Ah) print '(A)', '  - Thickness-aware Ah bounding'
@@ -345,10 +372,15 @@ contains
         print '(A,ES15.8)', '  RMS diffu:            ', rms_diffu
         print '(A,ES15.8)', '  RMS diffv:            ', rms_diffv
         print '(A)', ''
+        print '(A)', 'Friction Work:'
+        print '(A,ES15.8)', '  Max |FrictWork|:      ', max_FW
+        print '(A,ES15.8)', '  Avg FrictWork:        ', avg_FW
+        print '(A)', ''
 
         ! Check that accelerations are reasonable (not NaN or huge)
         if (max_diffu < 1.0e10_dp .and. max_diffv < 1.0e10_dp .and. &
-            max_diffu == max_diffu .and. max_diffv == max_diffv) then
+            max_diffu == max_diffu .and. max_diffv == max_diffv .and. &
+            max_FW == max_FW) then
             print '(A)', '  Status: PASS (accelerations are finite and reasonable)'
         else
             print '(A)', '  Status: FAIL (accelerations are NaN or too large)'

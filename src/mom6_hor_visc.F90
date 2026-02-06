@@ -42,6 +42,8 @@ module mom6_hor_visc
         logical :: Smagorinsky_Kh = .false. ! Smagorinsky for Laplacian viscosity
         logical :: Smagorinsky_Ah = .false. ! Smagorinsky for biharmonic viscosity
         logical :: Leith_Kh = .false.       ! Leith vorticity-gradient viscosity
+        logical :: Leith_Ah = .false.       ! Leith for biharmonic viscosity
+        logical :: compute_FrictWork = .false. ! Whether to compute friction work
         logical :: no_slip = .false.        ! No-slip boundary conditions (vs free-slip)
         logical :: bound_Kh = .false.       ! Apply stability bound to Kh
         logical :: better_bound_Kh = .false. ! Use thickness-aware Kh bounding
@@ -77,6 +79,8 @@ module mom6_hor_visc
         real(dp), allocatable :: Biharm_const_xy(:, :)  ! Smag biharm constant at q [L4]
         real(dp), allocatable :: Laplac3_const_xx(:, :) ! Leith constant at h [L3]
         real(dp), allocatable :: Laplac3_const_xy(:, :) ! Leith constant at q [L3]
+        real(dp), allocatable :: Biharm6_const_xx(:, :) ! Leith biharmonic constant at h [L6]
+        real(dp), allocatable :: Biharm6_const_xy(:, :) ! Leith biharmonic constant at q [L6]
 
         !----- Pre-computed metric products -----
         real(dp), allocatable :: dx2h(:, :)     ! dx^2 at h-points [L2]
@@ -112,6 +116,8 @@ module mom6_hor_visc
         ! Stress tensor
         real(dp), allocatable :: str_xx(:, :)   ! Diagonal stress [H L2 T-2]
         real(dp), allocatable :: str_xy(:, :)   ! Off-diagonal stress [H L2 T-2]
+        real(dp), allocatable :: bhstr_xx(:, :) ! Biharmonic-only stress at h-points [H L2 T-2]
+        real(dp), allocatable :: bhstr_xy(:, :) ! Biharmonic-only stress at q-points [H L2 T-2]
 
         ! Thicknesses at staggered points
         real(dp), allocatable :: h_u(:, :)      ! Thickness at u-points [H]
@@ -138,6 +144,7 @@ module mom6_hor_visc
         real(dp), allocatable :: grad_vort_mag_h(:, :) ! |grad(vort)| at h-points [L-1 T-1]
         real(dp), allocatable :: grad_vort_mag_q(:, :) ! |grad(vort)| at q-points [L-1 T-1]
         real(dp), allocatable :: vert_vort_mag(:, :)   ! Combined vorticity measure [L-1 T-1]
+        real(dp), allocatable :: Del2vort_q(:, :)      ! Laplacian of vorticity at q-points [L-2 T-1]
 
         ! Modified Leith divergence arrays
         real(dp), allocatable :: div_xx(:, :)       ! Divergence at h-points [T-1]
@@ -149,6 +156,7 @@ module mom6_hor_visc
     end type hor_visc_CS
 
     real(dp), parameter :: inv_PI3 = 1.0_dp/(3.14159265358979_dp**3)
+    real(dp), parameter :: inv_PI6 = 1.0_dp/(3.14159265358979_dp**6)
 
 contains
 
@@ -177,7 +185,10 @@ contains
             CS%Smagorinsky_Kh = Smagorinsky .and. CS%Laplacian
             CS%Smagorinsky_Ah = Smagorinsky .and. CS%biharmonic
         end if
-        if (present(Leith)) CS%Leith_Kh = Leith
+        if (present(Leith)) then
+            CS%Leith_Kh = Leith
+            if (Leith .and. CS%biharmonic) CS%Leith_Ah = .true.
+        end if
         if (present(no_slip)) CS%no_slip = no_slip
         if (present(better_bound)) then
             CS%better_bound_Kh = better_bound
@@ -252,6 +263,10 @@ contains
             ! Leith constants: C_leith * dx^3
             CS%Laplac3_const_xx(i, j) = CS%Leith_const*grid_sp_h3
             CS%Laplac3_const_xy(i, j) = CS%Leith_const*grid_sp_h3
+
+            ! Leith biharmonic constants: C_leith * dx^6
+            CS%Biharm6_const_xx(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
+            CS%Biharm6_const_xy(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
         end do
 
         ! Initialize work arrays to zero
@@ -266,6 +281,7 @@ contains
         CS%grad_vort_mag_h = 0.0_dp; CS%grad_vort_mag_q = 0.0_dp; CS%vert_vort_mag = 0.0_dp
         CS%div_xx = 0.0_dp; CS%div_xx_dx = 0.0_dp; CS%div_xx_dy = 0.0_dp
         CS%grad_div_mag_h = 0.0_dp; CS%grad_div_mag_q = 0.0_dp
+        CS%bhstr_xx = 0.0_dp; CS%bhstr_xy = 0.0_dp; CS%Del2vort_q = 0.0_dp
 
         ! Map arrays to GPU
         call map_hor_visc_to_gpu(CS)
@@ -301,6 +317,8 @@ contains
         allocate (CS%Biharm_const_xy(isd:ied, jsd:jed))
         allocate (CS%Laplac3_const_xx(isd:ied, jsd:jed))
         allocate (CS%Laplac3_const_xy(isd:ied, jsd:jed))
+        allocate (CS%Biharm6_const_xx(isd:ied, jsd:jed))
+        allocate (CS%Biharm6_const_xy(isd:ied, jsd:jed))
 
         ! Metric arrays
         allocate (CS%dx2h(isd:ied, jsd:jed))
@@ -331,6 +349,8 @@ contains
         allocate (CS%sh_xy(isd:ied, jsd:jed))
         allocate (CS%str_xx(isd:ied, jsd:jed))
         allocate (CS%str_xy(isd:ied, jsd:jed))
+        allocate (CS%bhstr_xx(isd:ied, jsd:jed))
+        allocate (CS%bhstr_xy(isd:ied, jsd:jed))
         allocate (CS%h_u(isd:ied, jsd:jed))
         allocate (CS%h_v(isd:ied, jsd:jed))
         allocate (CS%hq(isd:ied, jsd:jed))
@@ -355,6 +375,7 @@ contains
         allocate (CS%grad_vort_mag_h(isd:ied, jsd:jed))
         allocate (CS%grad_vort_mag_q(isd:ied, jsd:jed))
         allocate (CS%vert_vort_mag(isd:ied, jsd:jed))
+        allocate (CS%Del2vort_q(isd:ied, jsd:jed))
 
         ! Modified Leith arrays
         allocate (CS%div_xx(isd:ied, jsd:jed))
@@ -377,6 +398,7 @@ contains
         !$omp target enter data map(to: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
         !$omp target enter data map(to: CS%Biharm_const_xx, CS%Biharm_const_xy)
         !$omp target enter data map(to: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+        !$omp target enter data map(to: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
 
         ! Metrics
         !$omp target enter data map(to: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
@@ -387,6 +409,7 @@ contains
         ! Work arrays
         !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
         !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
+        !$omp target enter data map(alloc: CS%bhstr_xx, CS%bhstr_xy)
         !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
         !$omp target enter data map(alloc: CS%Kh, CS%Ah, CS%Shear_mag)
         !$omp target enter data map(alloc: CS%Del2u, CS%Del2v)
@@ -395,6 +418,7 @@ contains
         ! Leith arrays (allocated on GPU but computed on CPU, then transferred)
         !$omp target enter data map(alloc: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
         !$omp target enter data map(alloc: CS%grad_vort_mag_h, CS%grad_vort_mag_q, CS%vert_vort_mag)
+        !$omp target enter data map(alloc: CS%Del2vort_q)
         !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
         !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
 
@@ -412,18 +436,21 @@ contains
         !$omp target exit data map(delete: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
         !$omp target exit data map(delete: CS%Biharm_const_xx, CS%Biharm_const_xy)
         !$omp target exit data map(delete: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+        !$omp target exit data map(delete: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
         !$omp target exit data map(delete: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target exit data map(delete: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
         !$omp target exit data map(delete: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
         !$omp target exit data map(delete: CS%reduction_xx, CS%reduction_xy)
         !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
         !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
+        !$omp target exit data map(delete: CS%bhstr_xx, CS%bhstr_xy)
         !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
         !$omp target exit data map(delete: CS%Kh, CS%Ah, CS%Shear_mag)
         !$omp target exit data map(delete: CS%Del2u, CS%Del2v)
         !$omp target exit data map(delete: CS%hrat_min, CS%visc_bound_rem)
         !$omp target exit data map(delete: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
         !$omp target exit data map(delete: CS%grad_vort_mag_h, CS%grad_vort_mag_q, CS%vert_vort_mag)
+        !$omp target exit data map(delete: CS%Del2vort_q)
         !$omp target exit data map(delete: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
         !$omp target exit data map(delete: CS%grad_div_mag_h, CS%grad_div_mag_q)
 
@@ -442,6 +469,8 @@ contains
         if (allocated(CS%Biharm_const_xy)) deallocate (CS%Biharm_const_xy)
         if (allocated(CS%Laplac3_const_xx)) deallocate (CS%Laplac3_const_xx)
         if (allocated(CS%Laplac3_const_xy)) deallocate (CS%Laplac3_const_xy)
+        if (allocated(CS%Biharm6_const_xx)) deallocate (CS%Biharm6_const_xx)
+        if (allocated(CS%Biharm6_const_xy)) deallocate (CS%Biharm6_const_xy)
         if (allocated(CS%dx2h)) deallocate (CS%dx2h)
         if (allocated(CS%dy2h)) deallocate (CS%dy2h)
         if (allocated(CS%dx2q)) deallocate (CS%dx2q)
@@ -464,6 +493,8 @@ contains
         if (allocated(CS%sh_xy)) deallocate (CS%sh_xy)
         if (allocated(CS%str_xx)) deallocate (CS%str_xx)
         if (allocated(CS%str_xy)) deallocate (CS%str_xy)
+        if (allocated(CS%bhstr_xx)) deallocate (CS%bhstr_xx)
+        if (allocated(CS%bhstr_xy)) deallocate (CS%bhstr_xy)
         if (allocated(CS%h_u)) deallocate (CS%h_u)
         if (allocated(CS%h_v)) deallocate (CS%h_v)
         if (allocated(CS%hq)) deallocate (CS%hq)
@@ -480,6 +511,7 @@ contains
         if (allocated(CS%grad_vort_mag_h)) deallocate (CS%grad_vort_mag_h)
         if (allocated(CS%grad_vort_mag_q)) deallocate (CS%grad_vort_mag_q)
         if (allocated(CS%vert_vort_mag)) deallocate (CS%vert_vort_mag)
+        if (allocated(CS%Del2vort_q)) deallocate (CS%Del2vort_q)
         if (allocated(CS%div_xx)) deallocate (CS%div_xx)
         if (allocated(CS%div_xx_dx)) deallocate (CS%div_xx_dx)
         if (allocated(CS%div_xx_dy)) deallocate (CS%div_xx_dy)
@@ -498,7 +530,7 @@ contains
    !! - Multiple viscosity schemes: Laplacian, biharmonic, Smagorinsky, Leith
    !! - Stability bounding with thickness-aware limits
    !!
-    subroutine hor_visc(u, v, h, diffu, diffv, G, GV, CS)
+    subroutine hor_visc(u, v, h, diffu, diffv, G, GV, CS, uh, vh, FrictWork)
         type(ocean_grid_type), intent(in) :: G
         type(verticalGrid_type), intent(in) :: GV
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u    ! Zonal velocity [L T-1]
@@ -507,9 +539,13 @@ contains
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffu ! Zonal viscous accel [L T-2]
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffv ! Merid viscous accel [L T-2]
         type(hor_visc_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in), optional :: uh ! Volume transport [H L2 T-1]
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in), optional :: vh ! Volume transport [H L2 T-1]
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out), optional :: FrictWork ! Energy dissipation [H L2 T-3]
 
         real(dp) :: h_neglect, h_min, Kh_max_here, sh_xx_sq, sh_xy_sq
         real(dp) :: d_del2u, d_del2v, d_str, DY_dxBu_loc, DX_dyBu_loc
+        real(dp) :: Del2vort_h
         integer :: i, j, k, is, ie, js, je, nz, Isq, Ieq, Jsq, Jeq
 
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
@@ -650,6 +686,20 @@ contains
                     end do
                 end do
 
+                ! Laplacian of vorticity at q-points (for Leith biharmonic)
+                if (CS%Leith_Ah) then
+                    do J = Jsq, Jeq
+                        do I = Isq, Ieq
+                            CS%Del2vort_q(I, J) = CS%DY_dxBu(I, J)* &
+                                ((CS%vort_xy_dx(i + 1, J)*G%IdyCv(i + 1, J)) - &
+                                 (CS%vort_xy_dx(i, J)*G%IdyCv(i, J))) + &
+                                CS%DX_dyBu(I, J)* &
+                                ((CS%vort_xy_dy(I, j + 1)*G%IdxCu(I, j + 1)) - &
+                                 (CS%vort_xy_dy(I, j)*G%IdxCu(I, j)))
+                        end do
+                    end do
+                end if
+
                 ! Modified Leith: include divergence gradient (CPU)
                 if (CS%modified_Leith) then
                     do j = js, je
@@ -703,6 +753,9 @@ contains
 
                 ! Transfer Leith data back to GPU
                 !$omp target update to(CS%vert_vort_mag, CS%grad_vort_mag_q)
+                if (CS%Leith_Ah) then
+                    !$omp target update to(CS%Del2vort_q)
+                end if
             end if
 
             !=====================================================================
@@ -805,6 +858,15 @@ contains
                     end do
                 end if
 
+                ! Add Leith biharmonic contribution
+                if (CS%Leith_Ah) then
+                    do concurrent(j=js:je, i=is:ie)
+                        Del2vort_h = 0.25_dp*((CS%Del2vort_q(i, j) + CS%Del2vort_q(i - 1, j - 1)) + &
+                                              (CS%Del2vort_q(i - 1, j) + CS%Del2vort_q(i, j - 1)))
+                        CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm6_const_xx(i, j)*abs(Del2vort_h)*inv_PI6)
+                    end do
+                end if
+
                 ! Apply stability bounds
                 if (CS%better_bound_Ah) then
                     if (CS%better_bound_Kh) then
@@ -823,11 +885,12 @@ contains
                     end do
                 end if
 
-                ! Add biharmonic contribution to str_xx
+                ! Add biharmonic contribution to str_xx and store bhstr_xx
                 do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
                     d_del2u = (G%IdyCu(i, j)*CS%Del2u(i, j)) - (G%IdyCu(i - 1, j)*CS%Del2u(i - 1, j))
                     d_del2v = (G%IdxCv(i, j)*CS%Del2v(i, j)) - (G%IdxCv(i, j - 1)*CS%Del2v(i, j - 1))
                     d_str = CS%Ah(i, j)*((CS%DY_dxT(i, j)*d_del2u) - (CS%DX_dyT(i, j)*d_del2v))
+                    CS%bhstr_xx(i, j) = d_str*(h(i, j, k)*CS%reduction_xx(i, j))
                     CS%str_xx(i, j) = CS%str_xx(i, j) + d_str
                 end do
             end if
@@ -919,6 +982,13 @@ contains
                     end do
                 end if
 
+                ! Add Leith biharmonic contribution
+                if (CS%Leith_Ah) then
+                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
+                        CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm6_const_xy(I, J)*abs(CS%Del2vort_q(I, J))*inv_PI6)
+                    end do
+                end if
+
                 ! Apply stability bounds
                 if (CS%better_bound_Ah) then
                     do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
@@ -932,13 +1002,14 @@ contains
                     end do
                 end if
 
-                ! Add biharmonic contribution to str_xy
+                ! Add biharmonic contribution to str_xy and store bhstr_xy
                 do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%str_xy(I, J) = CS%str_xy(I, J) + &
-                                      CS%Ah(I, J)*((CS%DY_dxBu(I, J)*((CS%Del2v(i + 1, J)*G%IdyCv(i + 1, J)) - &
-                                                                      (CS%Del2v(i, J)*G%IdyCv(i, J)))) + &
-                                                   (CS%DX_dyBu(I, J)*((CS%Del2u(I, j + 1)*G%IdxCu(I, j + 1)) - &
-                                                                      (CS%Del2u(I, j)*G%IdxCu(I, j)))))
+                    d_str = CS%Ah(I, J)*((CS%DY_dxBu(I, J)*((CS%Del2v(i + 1, J)*G%IdyCv(i + 1, J)) - &
+                                                            (CS%Del2v(i, J)*G%IdyCv(i, J)))) + &
+                                         (CS%DX_dyBu(I, J)*((CS%Del2u(I, j + 1)*G%IdxCu(I, j + 1)) - &
+                                                            (CS%Del2u(I, j)*G%IdxCu(I, j)))))
+                    CS%bhstr_xy(I, J) = d_str*(CS%hq(I, J)*CS%reduction_xy(I, J))
+                    CS%str_xy(I, J) = CS%str_xy(I, J) + d_str
                 end do
             end if
 
@@ -975,6 +1046,34 @@ contains
                                                   (CS%dx2h(i, j + 1)*CS%str_xx(i, j + 1))))* &
                                   G%IareaCv(i, J))/(CS%h_v(i, J) + h_neglect)
             end do
+
+            !=====================================================================
+            ! STEP 15: Compute friction work (after diffu/diffv)
+            !=====================================================================
+            if (CS%compute_FrictWork .and. present(FrictWork)) then
+                !$omp target update from(CS%str_xx, CS%str_xy)
+                do j = js, je
+                    do i = is, ie
+                        FrictWork(i, j, k) = ( &
+                            ((CS%str_xx(i, j)*(u(i, j, k) - u(i - 1, j, k))*G%IdxT(i, j)) &
+                            - (CS%str_xx(i, j)*(v(i, j, k) - v(i, j - 1, k))*G%IdyT(i, j))) &
+                            + 0.25_dp*(( &
+                              (CS%str_xy(i, j)* &
+                                (((u(i, j + 1, k) - u(i, j, k))*G%IdyBu(i, j)) + &
+                                 ((v(i + 1, j, k) - v(i, j, k))*G%IdxBu(i, j)))) &
+                            + (CS%str_xy(i - 1, j - 1)* &
+                                (((u(i - 1, j, k) - u(i - 1, j - 1, k))*G%IdyBu(i - 1, j - 1)) + &
+                                 ((v(i, j - 1, k) - v(i - 1, j - 1, k))*G%IdxBu(i - 1, j - 1)))) ) &
+                            + ( &
+                              (CS%str_xy(i - 1, j)* &
+                                (((u(i - 1, j + 1, k) - u(i - 1, j, k))*G%IdyBu(i - 1, j)) + &
+                                 ((v(i, j, k) - v(i - 1, j, k))*G%IdxBu(i - 1, j)))) &
+                            + (CS%str_xy(i, j - 1)* &
+                                (((u(i, j, k) - u(i, j - 1, k))*G%IdyBu(i, j - 1)) + &
+                                 ((v(i + 1, j - 1, k) - v(i, j - 1, k))*G%IdxBu(i, j - 1)))) )))
+                    end do
+                end do
+            end if
 
         end do  ! k loop
 

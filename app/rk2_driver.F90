@@ -225,7 +225,7 @@ program rk2_driver
             ! 2. Horizontal viscosity (before Coriolis, per MOM6 step_MOM_dyn_split_RK2)
             call profiler_start("HorVisc")
             t_start = omp_get_wtime()
-            call hor_visc(u, v, h, diffu, diffv, G, GV, hvisc_CS)
+            call hor_visc(u, v, h, diffu, diffv, G, GV, hvisc_CS, uh, vh)
             t_end = omp_get_wtime()
             t_hor_visc = t_hor_visc + (t_end - t_start)
             call profiler_stop("HorVisc")
@@ -298,7 +298,7 @@ program rk2_driver
             ! 9. Horizontal viscosity with updated state
             call profiler_start("HorVisc")
             t_start = omp_get_wtime()
-            call hor_visc(up, vp, h, diffu, diffv, G, GV, hvisc_CS)
+            call hor_visc(up, vp, h, diffu, diffv, G, GV, hvisc_CS, uh, vh)
             t_end = omp_get_wtime()
             t_hor_visc = t_hor_visc + (t_end - t_start)
             call profiler_stop("HorVisc")
