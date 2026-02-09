@@ -618,27 +618,25 @@ contains
         end if ! present(uhbt)
 
         ! ============================================================================
-        ! Block 3: BT_cont - simplified computation (sequential on CPU, then sync)
+        ! Block 3: BT_cont - simplified computation as do concurrent
         ! Uses linear approximation: FA ≈ duhdu_tot_0
+        ! Use associate to bind pointer arrays to local names for GPU access
         ! ============================================================================
         if (set_BT_cont) then
-            do j = jsh, jeh
-                do I = ish - 1, ieh
+            associate(FA_u_W0 => BT_cont%FA_u_W0, FA_u_WW => BT_cont%FA_u_WW, &
+                      FA_u_E0 => BT_cont%FA_u_E0, FA_u_EE => BT_cont%FA_u_EE, &
+                      uBT_WW => BT_cont%uBT_WW, uBT_EE => BT_cont%uBT_EE)
+                do concurrent (j = jsh:jeh, I = ish - 1:ieh)
                     ! duhdu_tot_0 is the effective face area at du=0
                     ! Use it as constant approximation for all BT_cont coefficients
-                    BT_cont%FA_u_W0(I, j) = CS%duhdu_tot_0(I, j)
-                    BT_cont%FA_u_WW(I, j) = CS%duhdu_tot_0(I, j)
-                    BT_cont%FA_u_E0(I, j) = CS%duhdu_tot_0(I, j)
-                    BT_cont%FA_u_EE(I, j) = CS%duhdu_tot_0(I, j)
-                    BT_cont%uBT_WW(I, j) = 0.0_dp
-                    BT_cont%uBT_EE(I, j) = 0.0_dp
+                    FA_u_W0(I, j) = CS%duhdu_tot_0(I, j)
+                    FA_u_WW(I, j) = CS%duhdu_tot_0(I, j)
+                    FA_u_E0(I, j) = CS%duhdu_tot_0(I, j)
+                    FA_u_EE(I, j) = CS%duhdu_tot_0(I, j)
+                    uBT_WW(I, j) = 0.0_dp
+                    uBT_EE(I, j) = 0.0_dp
                 end do
-            end do
-#ifdef __NVCOMPILER_LLVM__
-            ! Sync BT_cont arrays from CPU to GPU
-            !$omp target update to(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0, &
-            !$omp&                 BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
-#endif
+            end associate
         end if
 
         if (set_BT_cont) then
