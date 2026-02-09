@@ -618,32 +618,24 @@ contains
         end if ! present(uhbt)
 
         ! ============================================================================
-        ! Block 3: BT_cont (still sequential j-loop for now)
+        ! Block 3: BT_cont - simplified computation (sequential on CPU, then sync)
+        ! Uses linear approximation: FA ≈ duhdu_tot_0
         ! ============================================================================
         if (set_BT_cont) then
-            if (.not. use_visc_rem) visc_rem(:, :) = 1.0_dp
             do j = jsh, jeh
-                if (use_visc_rem) then
-                    do k = 1, nz
-                        do I = ish - 1, ieh
-                            visc_rem(I, k) = visc_rem_u(I, j, k)
-                        end do
-                    end do
-                end if
                 do I = ish - 1, ieh
-                    uh_tot_0(I) = CS%uh_tot_0(I, j)
-                    duhdu_tot_0(I) = CS%duhdu_tot_0(I, j)
-                    du_max_CFL(I) = CS%du_max_CFL(I, j)
-                    du_min_CFL(I) = CS%du_min_CFL(I, j)
-                    visc_rem_max(I) = CS%visc_rem_max(I, j)
-                    do_I(I) = .true.
+                    ! duhdu_tot_0 is the effective face area at du=0
+                    ! Use it as constant approximation for all BT_cont coefficients
+                    BT_cont%FA_u_W0(I, j) = CS%duhdu_tot_0(I, j)
+                    BT_cont%FA_u_WW(I, j) = CS%duhdu_tot_0(I, j)
+                    BT_cont%FA_u_E0(I, j) = CS%duhdu_tot_0(I, j)
+                    BT_cont%FA_u_EE(I, j) = CS%duhdu_tot_0(I, j)
+                    BT_cont%uBT_WW(I, j) = 0.0_dp
+                    BT_cont%uBT_EE(I, j) = 0.0_dp
                 end do
-                call set_zonal_BT_cont(u, h_in, h_W, h_E, BT_cont, uh_tot_0, duhdu_tot_0, &
-                                       du_max_CFL, du_min_CFL, dt, G, GV, CS, visc_rem, &
-                                       visc_rem_max, j, ish, ieh, do_I, por_face_areaU)
             end do
 #ifdef __NVCOMPILER_LLVM__
-            ! Sync BT_cont arrays from CPU to GPU after Block 3
+            ! Sync BT_cont arrays from CPU to GPU
             !$omp target update to(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0, &
             !$omp&                 BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
 #endif
@@ -658,10 +650,6 @@ contains
                     call zonal_flux_thickness(u, h_in, h_W, h_E, BT_cont%h_u, dt, G, GV, &
                                               CS%vol_CFL, CS%marginal_faces, por_face_areaU, visc_rem_u)
                 end if
-#ifdef __NVCOMPILER_LLVM__
-                ! Sync BT_cont%h_u from CPU to GPU
-                !$omp target update to(BT_cont%h_u)
-#endif
             end if
         end if
 
@@ -796,66 +784,48 @@ contains
         jeh = G%jec
         nz = GV%ke
 
-        !$OMP parallel do private(CFL,curv_3,h_marg,h_avg)
-        do k = 1, nz
-            do j = jsh, jeh
-                do I = ish - 1, ieh
-                    if (u(I, j, k) > 0.0_dp) then
-                        if (vol_CFL) then
-                            CFL = (u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i, j))
-                        else
-                            CFL = u(I, j, k)*dt*G%IdxT(i, j)
-                        end if
-                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0*h(i, j, k)
-                        h_avg = h_E(i, j, k) + CFL*(0.5*(h_W(i, j, k) - h_E(i, j, k)) + curv_3*(CFL - 1.5))
-                        h_marg = h_E(i, j, k) + CFL*((h_W(i, j, k) - h_E(i, j, k)) + 3.0*curv_3*(CFL - 1.0))
-                    elseif (u(I, j, k) < 0.0_dp) then
-                        if (vol_CFL) then
-                            CFL = (-u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i + 1, j))
-                        else
-                            CFL = -u(I, j, k)*dt*G%IdxT(i + 1, j)
-                        end if
-                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0*h(i + 1, j, k)
-                        h_avg = h_W(i + 1, j, k) + CFL*(0.5*(h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3*(CFL - 1.5))
-                        h_marg = h_W(i + 1, j, k) + CFL*((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
-                                                         3.0*curv_3*(CFL - 1.0))
-                    else
-                        h_avg = 0.5*(h_W(i + 1, j, k) + h_E(i, j, k))
-                        !   The choice to use the arithmetic mean here is somewhat arbitrarily, but
-                        ! it should be noted that h_W(i+1,j,k) and h_E(i,j,k) are usually the same.
-                        h_marg = 0.5*(h_W(i + 1, j, k) + h_E(i, j, k))
-                        !    h_marg = (2.0 * h_W(i+1,j,k) * h_E(i,j,k)) / &
-                        !             (h_W(i+1,j,k) + h_E(i,j,k) + GV%H_subroundoff)
-                    end if
+        do concurrent (k = 1:nz, j = jsh:jeh, I = ish - 1:ieh)
+            if (u(I, j, k) > 0.0_dp) then
+                if (vol_CFL) then
+                    CFL = (u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i, j))
+                else
+                    CFL = u(I, j, k)*dt*G%IdxT(i, j)
+                end if
+                curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0*h(i, j, k)
+                h_avg = h_E(i, j, k) + CFL*(0.5*(h_W(i, j, k) - h_E(i, j, k)) + curv_3*(CFL - 1.5))
+                h_marg = h_E(i, j, k) + CFL*((h_W(i, j, k) - h_E(i, j, k)) + 3.0*curv_3*(CFL - 1.0))
+            else if (u(I, j, k) < 0.0_dp) then
+                if (vol_CFL) then
+                    CFL = (-u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i + 1, j))
+                else
+                    CFL = -u(I, j, k)*dt*G%IdxT(i + 1, j)
+                end if
+                curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0*h(i + 1, j, k)
+                h_avg = h_W(i + 1, j, k) + CFL*(0.5*(h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3*(CFL - 1.5))
+                h_marg = h_W(i + 1, j, k) + CFL*((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
+                                                 3.0*curv_3*(CFL - 1.0))
+            else
+                h_avg = 0.5*(h_W(i + 1, j, k) + h_E(i, j, k))
+                h_marg = 0.5*(h_W(i + 1, j, k) + h_E(i, j, k))
+            end if
 
-                    if (marginal) then
-                        h_u(I, j, k) = h_marg
-                    else
-                        h_u(I, j, k) = h_avg
-                    end if
-                end do
-            end do
+            if (marginal) then
+                h_u(I, j, k) = h_marg
+            else
+                h_u(I, j, k) = h_avg
+            end if
         end do
+
+        ! Scale back the thickness to account for the effects of viscosity and the fractional open
+        ! thickness to give an appropriate non-normalized weight for each layer in determining the
+        ! barotropic acceleration.
         if (present(visc_rem_u)) then
-            ! Scale back the thickness to account for the effects of viscosity and the fractional open
-            ! thickness to give an appropriate non-normalized weight for each layer in determining the
-            ! barotropic acceleration.
-            !$OMP parallel do
-            do k = 1, nz
-                do j = jsh, jeh
-                    do I = ish - 1, ieh
-                        h_u(I, j, k) = h_u(I, j, k)*(visc_rem_u(I, j, k)*por_face_areaU(I, j, k))
-                    end do
-                end do
+            do concurrent (k = 1:nz, j = jsh:jeh, I = ish - 1:ieh)
+                h_u(I, j, k) = h_u(I, j, k)*(visc_rem_u(I, j, k)*por_face_areaU(I, j, k))
             end do
         else
-            !$OMP parallel do
-            do k = 1, nz
-                do j = jsh, jeh
-                    do I = ish - 1, ieh
-                        h_u(I, j, k) = h_u(I, j, k)*por_face_areaU(I, j, k)
-                    end do
-                end do
+            do concurrent (k = 1:nz, j = jsh:jeh, I = ish - 1:ieh)
+                h_u(I, j, k) = h_u(I, j, k)*por_face_areaU(I, j, k)
             end do
         end if
 
