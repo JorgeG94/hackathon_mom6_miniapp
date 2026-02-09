@@ -12,6 +12,8 @@ module mom6_types
     public :: G_EARTH, RHO_0, OMEGA
     public :: init_ocean_grid, end_ocean_grid, init_verticalGrid
     public :: BT_cont_type, alloc_BT_cont_type
+    public :: mech_forcing_type, init_mech_forcing, end_mech_forcing
+    public :: vertvisc_type, init_vertvisc_visc, end_vertvisc_visc
 
     !> Ocean grid structure (simplified from MOM6's ocean_grid_type)
     type :: ocean_grid_type
@@ -94,6 +96,19 @@ module mom6_types
         ! would also have equivalent variables for meridional, but those are ignored for this example
     end type BT_cont_type
 
+    !> Mechanical forcing type (wind stress)
+    type :: mech_forcing_type
+        real(dp), allocatable :: taux(:, :)   ! Zonal wind stress at u-points [Pa]
+        real(dp), allocatable :: tauy(:, :)   ! Meridional wind stress at v-points [Pa]
+    end type mech_forcing_type
+
+    !> Vertical viscosity input type (Rayleigh drag)
+    type :: vertvisc_type
+        real(dp), allocatable :: Ray_u(:, :, :)  ! Rayleigh drag at u-points [H T-1 ~> m/s]
+        real(dp), allocatable :: Ray_v(:, :, :)  ! Rayleigh drag at v-points [H T-1 ~> m/s]
+        logical :: has_Rayleigh = .false.
+    end type vertvisc_type
+
 contains
 
     !> Initialize the ocean grid with uniform spacing
@@ -155,6 +170,7 @@ contains
 
         ! Initialize uniform grid metrics
 #ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(to: G)
         !$omp target enter data map(alloc: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
         !$omp target enter data map(alloc: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
@@ -310,5 +326,71 @@ contains
         deallocate (BT_cont)
 
     end subroutine dealloc_BT_cont_type
+
+    !> Initialize mechanical forcing arrays
+    subroutine init_mech_forcing(forces, G)
+        type(mech_forcing_type), intent(inout) :: forces
+        type(ocean_grid_type), intent(in) :: G
+
+        allocate (forces%taux(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate (forces%tauy(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(alloc: forces%taux, forces%tauy)
+#endif
+
+    end subroutine init_mech_forcing
+
+    !> Deallocate mechanical forcing arrays
+    subroutine end_mech_forcing(forces)
+        type(mech_forcing_type), intent(inout) :: forces
+
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target exit data map(delete: forces%taux, forces%tauy)
+#endif
+
+        if (allocated(forces%taux)) deallocate (forces%taux)
+        if (allocated(forces%tauy)) deallocate (forces%tauy)
+
+    end subroutine end_mech_forcing
+
+    !> Initialize vertvisc_type arrays (Rayleigh drag)
+    subroutine init_vertvisc_visc(visc, G, GV, use_rayleigh)
+        type(vertvisc_type), intent(inout) :: visc
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        logical, intent(in), optional :: use_rayleigh
+
+        integer :: nz
+
+        nz = GV%ke
+        visc%has_Rayleigh = .false.
+        if (present(use_rayleigh)) visc%has_Rayleigh = use_rayleigh
+
+        if (visc%has_Rayleigh) then
+            allocate (visc%Ray_u(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
+            allocate (visc%Ray_v(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
+
+#ifdef __NVCOMPILER_LLVM__
+            !$omp target enter data map(alloc: visc%Ray_u, visc%Ray_v)
+#endif
+        end if
+
+    end subroutine init_vertvisc_visc
+
+    !> Deallocate vertvisc_type arrays
+    subroutine end_vertvisc_visc(visc)
+        type(vertvisc_type), intent(inout) :: visc
+
+#ifdef __NVCOMPILER_LLVM__
+        if (allocated(visc%Ray_u)) then
+            !$omp target exit data map(delete: visc%Ray_u, visc%Ray_v)
+        end if
+#endif
+
+        if (allocated(visc%Ray_u)) deallocate (visc%Ray_u)
+        if (allocated(visc%Ray_v)) deallocate (visc%Ray_v)
+
+    end subroutine end_vertvisc_visc
 
 end module mom6_types

@@ -3,7 +3,10 @@ program vert_visc_driver
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid
+                          init_verticalGrid, end_ocean_grid, RHO_0, &
+                          mech_forcing_type, vertvisc_type, &
+                          init_mech_forcing, end_mech_forcing, &
+                          init_vertvisc_visc, end_vertvisc_visc
     use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
                               vert_visc_remnant, vert_visc_apply, vert_visc_end
     implicit none
@@ -11,22 +14,25 @@ program vert_visc_driver
     type(ocean_grid_type) :: G
     type(verticalGrid_type) :: GV
     type(vert_visc_CS) :: CS
+    type(mech_forcing_type) :: forces
+    type(vertvisc_type) :: visc
 
     real(dp), allocatable :: u(:, :, :), v(:, :, :), h(:, :, :)
     real(dp), allocatable :: u_init(:, :, :), v_init(:, :, :)
 
     real(dp) :: dt, t_start, t_end, t_total, t_coef, t_apply, t_remnant
-    real(dp) :: Kv, Kv_ml, Kv_bbl, Hmix, Hbbl
+    real(dp) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
+    real(dp), parameter :: PI = 3.14159265358979_dp
     integer :: ni, nj, nk, niter, iter, i, j, k
     character(len=32) :: arg
 
     ! Default parameters
     ni = 180; nj = 180; nk = 75; niter = 10
-    Kv = 1.0e-4_dp      ! Interior viscosity [m2/s]
-    Kv_ml = 1.0e-2_dp   ! Mixed layer viscosity [m2/s]
-    Kv_bbl = 1.0e-2_dp  ! Bottom boundary layer viscosity [m2/s]
-    Hmix = 50.0_dp      ! Mixed layer depth [m]
-    Hbbl = 10.0_dp      ! BBL thickness [m]
+    Kv = 1.0e-4_dp          ! Interior viscosity [m2/s]
+    Kv_ml = 1.0e-2_dp       ! Mixed layer viscosity [m2/s]
+    Kv_extra_bbl = 1.0e-2_dp ! Extra BBL viscosity [m2/s]
+    Hmix = 50.0_dp           ! Mixed layer depth [m]
+    Hbbl = 10.0_dp           ! BBL thickness [m]
 
     ! Parse command line
     if (command_argument_count() >= 1) then
@@ -49,7 +55,7 @@ program vert_visc_driver
     print '(A,I4)', 'Iterations: ', niter
     print '(A,ES10.3)', 'Interior Kv [m2/s]: ', Kv
     print '(A,ES10.3)', 'Mixed layer Kv [m2/s]: ', Kv_ml
-    print '(A,ES10.3)', 'BBL Kv [m2/s]: ', Kv_bbl
+    print '(A,ES10.3)', 'Extra BBL Kv [m2/s]: ', Kv_extra_bbl
     print '(A,F8.1)', 'Mixed layer depth [m]: ', Hmix
     print '(A,F8.1)', 'BBL thickness [m]: ', Hbbl
     print '(A)', '=================================================='
@@ -57,7 +63,39 @@ program vert_visc_driver
     ! Initialize grid
     call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
     call init_verticalGrid(GV, nk)
-    call vert_visc_init(CS, G, GV, Kv, Kv_ml, Kv_bbl, Hmix, Hbbl)
+    call vert_visc_init(CS, G, GV, Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl)
+
+    ! Initialize forces (sinusoidal wind stress)
+    call init_mech_forcing(forces, G)
+    do j = G%jsd, G%jed
+        do i = G%isd, G%ied
+            forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(nj, dp) * PI)
+            forces%tauy(i, j) = 0.0_dp
+        end do
+    end do
+#ifdef __NVCOMPILER_LLVM__
+    !$omp target update to(forces%taux, forces%tauy)
+#endif
+
+    ! Initialize visc (Rayleigh drag in bottom layer)
+    call init_vertvisc_visc(visc, G, GV, use_rayleigh=.true.)
+    do k = 1, nk
+        do j = G%jsd, G%jed
+            do i = G%isd, G%ied
+                visc%Ray_u(i, j, k) = 0.0_dp
+                visc%Ray_v(i, j, k) = 0.0_dp
+            end do
+        end do
+    end do
+    do j = G%jsd, G%jed
+        do i = G%isd, G%ied
+            visc%Ray_u(i, j, nk) = 1.0e-4_dp
+            visc%Ray_v(i, j, nk) = 1.0e-4_dp
+        end do
+    end do
+#ifdef __NVCOMPILER_LLVM__
+    !$omp target update to(visc%Ray_u, visc%Ray_v)
+#endif
 
     dt = 300.0_dp  ! 5 minute timestep
 
@@ -76,13 +114,13 @@ program vert_visc_driver
     ! Surface-intensified flow that should be smoothed by viscosity
     do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
         ! Layer thickness (uniform)
-        h(i, j, k) = 4000.0_dp/real(nk, dp)
+        h(i, j, k) = 4000.0_dp / real(nk, dp)
 
         ! Velocity with strong vertical shear (surface jet)
-        u_init(i, j, k) = 0.5_dp*exp(-real(k - 1, dp)/10.0_dp)* &
-                          sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp)
-        v_init(i, j, k) = 0.3_dp*exp(-real(k - 1, dp)/10.0_dp)* &
-                          cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp)
+        u_init(i, j, k) = 0.5_dp * exp(-real(k - 1, dp) / 10.0_dp) * &
+                          sin(real(j - 1, dp) / real(nj, dp) * PI)
+        v_init(i, j, k) = 0.3_dp * exp(-real(k - 1, dp) / 10.0_dp) * &
+                          cos(real(i - 1, dp) / real(ni, dp) * PI)
 
         u(i, j, k) = u_init(i, j, k)
         v(i, j, k) = v_init(i, j, k)
@@ -110,21 +148,21 @@ program vert_visc_driver
         !$omp target update to(u, v)
 #endif
 
-        ! Compute coefficients (uses find_coupling_coef internally)
+        ! Compute coefficients (harmonic mean + upwind switching)
         t_start = omp_get_wtime()
         call vert_visc_coef(u, v, h, CS, G, GV)
         t_end = omp_get_wtime()
         t_coef = t_coef + (t_end - t_start)
 
-        ! Compute remnant velocity fractions (vertvisc_remnant)
+        ! Compute remnant velocity fractions (with Rayleigh drag)
         t_start = omp_get_wtime()
-        call vert_visc_remnant(dt, CS, G, GV)
+        call vert_visc_remnant(dt, CS, G, GV, visc)
         t_end = omp_get_wtime()
         t_remnant = t_remnant + (t_end - t_start)
 
-        ! Apply viscosity
+        ! Apply viscosity (with surface stress and Rayleigh drag)
         t_start = omp_get_wtime()
-        call vert_visc_apply(u, v, h, dt, CS, G, GV)
+        call vert_visc_apply(u, v, h, dt, CS, G, GV, forces, visc)
         t_end = omp_get_wtime()
         t_apply = t_apply + (t_end - t_start)
     end do
@@ -133,6 +171,7 @@ program vert_visc_driver
 
 #ifdef __NVCOMPILER_LLVM__
     !$omp target exit data map(from: u, v)
+    !$omp target update from(CS%taux_bot, CS%tauy_bot)
     !$omp target exit data map(delete: h, u_init, v_init)
 #endif
 
@@ -144,7 +183,7 @@ program vert_visc_driver
     print '(A,F12.6)', '  Coefficient time:      ', t_coef
     print '(A,F12.6)', '  Remnant time:          ', t_remnant
     print '(A,F12.6)', '  Apply time:            ', t_apply
-    print '(A,F12.6)', 'Time per iteration:      ', t_total/real(niter, dp)
+    print '(A,F12.6)', 'Time per iteration:      ', t_total / real(niter, dp)
     print '(A)', '=================================================='
 
     ! Verify that viscosity reduced shear
@@ -153,8 +192,13 @@ program vert_visc_driver
     ! Report remnant statistics
     call report_remnant(CS, G, GV)
 
+    ! Report bottom stress
+    call report_bottom_stress(CS, G)
+
     ! Cleanup
     call vert_visc_end(CS)
+    call end_mech_forcing(forces)
+    call end_vertvisc_visc(visc)
     call end_ocean_grid(G)
     deallocate (u, v, h, u_init, v_init)
 
@@ -199,7 +243,7 @@ contains
 
         shear_init = sqrt(shear_init)
         shear_final = sqrt(shear_final)
-        shear_reduction = (shear_init - shear_final)/shear_init*100.0_dp
+        shear_reduction = (shear_init - shear_final) / shear_init * 100.0_dp
 
         print '(A)', ''
         print '(A)', 'Viscosity Verification:'
@@ -230,8 +274,8 @@ contains
         integer :: i_mid, j_mid
 
         ! Sample from middle of domain
-        i_mid = (G%isc + G%iec)/2
-        j_mid = (G%jsc + G%jec)/2
+        i_mid = (G%isc + G%iec) / 2
+        j_mid = (G%jsc + G%jec) / 2
 
         rem_min = 1.0_dp
         rem_max = 0.0_dp
@@ -251,7 +295,7 @@ contains
             end do
         end do
 
-        if (cnt > 0) rem_avg = rem_avg/real(cnt, dp)
+        if (cnt > 0) rem_avg = rem_avg / real(cnt, dp)
 
         rem_surf = CS%visc_rem_u(i_mid, j_mid, 1)
         rem_bot = CS%visc_rem_u(i_mid, j_mid, GV%ke)
@@ -270,5 +314,41 @@ contains
         print '(A)', '  (Values near 0.0 = strong viscosity coupling)'
 
     end subroutine report_remnant
+
+    subroutine report_bottom_stress(CS, G)
+        type(vert_visc_CS), intent(in) :: CS
+        type(ocean_grid_type), intent(in) :: G
+
+        real(dp) :: taux_min, taux_max, tauy_min, tauy_max
+        integer :: i, j
+
+        taux_min = huge(1.0_dp); taux_max = -huge(1.0_dp)
+        tauy_min = huge(1.0_dp); tauy_max = -huge(1.0_dp)
+
+        do j = G%jsc, G%jec
+            do i = G%isc - 1, G%iec
+                if (G%mask2dCu(i, j) > 0.0_dp) then
+                    taux_min = min(taux_min, CS%taux_bot(i, j))
+                    taux_max = max(taux_max, CS%taux_bot(i, j))
+                end if
+            end do
+        end do
+
+        do j = G%jsc - 1, G%jec
+            do i = G%isc, G%iec
+                if (G%mask2dCv(i, j) > 0.0_dp) then
+                    tauy_min = min(tauy_min, CS%tauy_bot(i, j))
+                    tauy_max = max(tauy_max, CS%tauy_bot(i, j))
+                end if
+            end do
+        end do
+
+        print '(A)', ''
+        print '(A)', 'Bottom Stress [Pa]:'
+        print '(A)', '--------------------------------------------------'
+        print '(A,ES12.5,A,ES12.5)', '  taux_bot: min = ', taux_min, '  max = ', taux_max
+        print '(A,ES12.5,A,ES12.5)', '  tauy_bot: min = ', tauy_min, '  max = ', tauy_max
+
+    end subroutine report_bottom_stress
 
 end program vert_visc_driver

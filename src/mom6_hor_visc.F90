@@ -430,6 +430,7 @@ contains
         !$omp target enter data map(alloc: CS%Del2vort_q)
         !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
         !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
+        !$omp target enter data map(to:CS)
 #endif
 
     end subroutine map_hor_visc_to_gpu

@@ -20,13 +20,16 @@ program rk2_driver
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, G_EARTH, BT_cont_type, &
-                          alloc_BT_cont_type
+                          alloc_BT_cont_type, &
+                          mech_forcing_type, vertvisc_type, &
+                          init_mech_forcing, end_mech_forcing, &
+                          init_vertvisc_visc, end_vertvisc_visc
     use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
     use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                              SADOURNY75_ENERGY
     use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
     use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
-                              vert_visc_apply, vert_visc_end
+                              vert_visc_apply, vert_visc_end, vert_visc_remnant
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
     use mom6_diag, only: diag_ctrl, diag_init, diag_end, register_diag_field, DIAG_STATS, &
                          post_data_3d, post_data_2d, post_product_sum_u, post_product_sum_v, &
@@ -47,6 +50,8 @@ program rk2_driver
     type(hor_visc_CS) :: hvisc_CS
     type(diag_ctrl) :: diag_CS
     type(BT_cont_type), pointer :: BT_cont
+    type(mech_forcing_type) :: forces
+    type(vertvisc_type) :: visc
 
     ! Diagnostic IDs
     integer :: id_KE, id_diffu_sum, id_diffv_sum, id_mass
@@ -133,8 +138,13 @@ program rk2_driver
     call alloc_BT_cont_type(BT_cont, G, GV)
     call coriolis_init(cor_CS, G, SADOURNY75_ENERGY)
     call barotropic_init(bt_CS, G, dt, bt_nsteps)
-    call vert_visc_init(visc_CS, G, GV, Kv=1.0e-4_dp, Kv_ml=1.0e-2_dp, Hmix=50.0_dp)
+    call vert_visc_init(visc_CS, G, GV, Kv=1.0e-4_dp, Kv_ml=1.0e-2_dp, &
+                        Kv_extra_bbl=1.0e-2_dp, Hmix=50.0_dp)
     call hor_visc_init(hvisc_CS, G, GV, Kh=100.0_dp)
+
+    ! Initialize forces and visc for vertical viscosity
+    call init_mech_forcing(forces, G)
+    call init_vertvisc_visc(visc, G, GV, use_rayleigh=.true.)
 
     ! Initialize diagnostics
     call diag_init(diag_CS, G, GV, output_dir='./', output_freq=1)
@@ -187,6 +197,9 @@ program rk2_driver
     !$omp target enter data map(alloc: diffu, diffv)
     !$omp target enter data map(alloc: eta, ubt, vbt, ubt_av, vbt_av, eta_av)
 #endif
+
+    ! Initialize forces/visc data
+    call initialize_forces_visc(forces, visc, G, GV)
 
     ! Initialize state
     call initialize_state(u, v, h, h0, eta, ubt, vbt, G, GV)
@@ -254,7 +267,7 @@ program rk2_driver
             call profiler_start("VertVisc")
             t_start = omp_get_wtime()
             call vert_visc_coef(up, vp, h, visc_CS, G, GV)
-            call vert_visc_apply(up, vp, h, dt, visc_CS, G, GV)
+            call vert_visc_apply(up, vp, h, dt, visc_CS, G, GV, forces, visc)
             t_end = omp_get_wtime()
             t_vert_visc = t_vert_visc + (t_end - t_start)
             call profiler_stop("VertVisc")
@@ -329,7 +342,7 @@ program rk2_driver
             call profiler_start("VertVisc")
             t_start = omp_get_wtime()
             call vert_visc_coef(u, v, h, visc_CS, G, GV)
-            call vert_visc_apply(u, v, h, 0.5_dp*dt, visc_CS, G, GV)
+            call vert_visc_apply(u, v, h, 0.5_dp*dt, visc_CS, G, GV, forces, visc)
             t_end = omp_get_wtime()
             t_vert_visc = t_vert_visc + (t_end - t_start)
             call profiler_stop("VertVisc")
@@ -422,6 +435,8 @@ program rk2_driver
     call profiler_stop("Finalize_barotropic")
 
     call profiler_start("Finalize_vert_visc")
+    call end_mech_forcing(forces)
+    call end_vertvisc_visc(visc)
     call vert_visc_end(visc_CS)
     call profiler_stop("Finalize_vert_visc")
 
@@ -488,6 +503,34 @@ contains
         ! A "target update to" would overwrite device data with uninitialized host data.
 
     end subroutine initialize_state
+
+    subroutine initialize_forces_visc(forces, visc, G, GV)
+        type(mech_forcing_type), intent(inout) :: forces
+        type(vertvisc_type), intent(inout) :: visc
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+
+        integer :: i, j, k
+
+        ! Sinusoidal zonal wind stress (~0.1 Pa)
+        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+            forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(G%nj, dp) * 3.14159_dp)
+            forces%tauy(i, j) = 0.0_dp
+        end do
+
+        ! Rayleigh drag in bottom layer only
+        if (visc%has_Rayleigh) then
+            do concurrent(k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%ied)
+                visc%Ray_u(i, j, k) = 0.0_dp
+                visc%Ray_v(i, j, k) = 0.0_dp
+            end do
+            do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+                visc%Ray_u(i, j, GV%ke) = 1.0e-4_dp
+                visc%Ray_v(i, j, GV%ke) = 1.0e-4_dp
+            end do
+        end if
+
+    end subroutine initialize_forces_visc
 
     subroutine compute_transports(u, v, h, uh, vh, G, GV)
         type(ocean_grid_type), intent(in) :: G

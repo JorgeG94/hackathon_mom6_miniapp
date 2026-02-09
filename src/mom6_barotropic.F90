@@ -103,6 +103,7 @@ contains
         allocate (CS%vhbt_av(G%isd:G%ied, G%jsd:G%jed))
 
 #ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(to: CS)
         !$omp target enter data map(alloc: CS%eta, CS%eta_pred, CS%ubt, CS%vbt)
         !$omp target enter data map(alloc: CS%ubt_prev, CS%vbt_prev, CS%uhbt, CS%vhbt)
         !$omp target enter data map(alloc: CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
