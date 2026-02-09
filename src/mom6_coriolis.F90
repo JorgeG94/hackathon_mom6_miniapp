@@ -72,6 +72,7 @@ contains
         allocate (CS%d(G%isd:G%ied, G%jsd:G%jed))
 
 #ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(to:CS)
         !$omp target enter data map(alloc: CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort)
         !$omp target enter data map(alloc: CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, CS%Area_q)
         !$omp target enter data map(alloc: CS%KE, CS%a, CS%b, CS%c, CS%d)
