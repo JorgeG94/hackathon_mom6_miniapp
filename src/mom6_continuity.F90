@@ -89,7 +89,7 @@ contains
         if (allocated(u_cor)) deallocate (u_cor)
         if (allocated(du_cor)) deallocate (du_cor)
         if (allocated(por_face_areaU)) deallocate (por_face_areaU)
-        if (allocated(visc_rem_u)) deallocate(visc_rem_u)
+        if (allocated(visc_rem_u)) deallocate (visc_rem_u)
 
         CS%initialized = .false.
 
@@ -144,39 +144,38 @@ contains
 
     end subroutine continuity_PPM
 
-
 !> Updates the thicknesses due to zonal thickness fluxes.
-subroutine continuity_zonal_convergence(h, uh, dt, G, GV, hin, hmin)
-  type(ocean_grid_type),       intent(in)    :: G    !< Ocean's grid structure
-  type(verticalGrid_type),     intent(in)    :: GV   !< Ocean's vertical grid structure
-  real(dp), dimension(G%isd:G%ied,G%jsd:G%jed,GV%ke), &
-                               intent(inout) :: h    !< Final layer thickness [H ~> m or kg m-2]
-  real(dp), dimension(G%isd:G%ied,G%jsd:G%jed,GV%ke), &
-                               intent(in)    :: uh   !< Zonal thickness flux, u*h*dy [H L2 T-1 ~> m3 s-1 or kg s-1]
-  real(dp),                        intent(in)    :: dt   !< Time increment [T ~> s]
-  real(dp), dimension(G%isd:G%ied,G%jsd:G%jed,GV%ke), &
-                     optional, intent(in)    :: hin  !< Initial layer thickness [H ~> m or kg m-2].
+    subroutine continuity_zonal_convergence(h, uh, dt, G, GV, hin, hmin)
+        type(ocean_grid_type), intent(in)    :: G    !< Ocean's grid structure
+        type(verticalGrid_type), intent(in)    :: GV   !< Ocean's vertical grid structure
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
+            intent(inout) :: h    !< Final layer thickness [H ~> m or kg m-2]
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
+            intent(in)    :: uh   !< Zonal thickness flux, u*h*dy [H L2 T-1 ~> m3 s-1 or kg s-1]
+        real(dp), intent(in)    :: dt   !< Time increment [T ~> s]
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
+            optional, intent(in)    :: hin  !< Initial layer thickness [H ~> m or kg m-2].
                                                      !! If hin is absent, h is also the initial thickness.
-  real(dp),              optional, intent(in)    :: hmin !< The minimum layer thickness [H ~> m or kg m-2]
+        real(dp), optional, intent(in)    :: hmin !< The minimum layer thickness [H ~> m or kg m-2]
 
-  real(dp) :: h_min  ! The minimum layer thickness [H ~> m or kg m-2].  h_min could be 0.
-  integer :: i, j, k
+        real(dp) :: h_min  ! The minimum layer thickness [H ~> m or kg m-2].  h_min could be 0.
+        integer :: i, j, k
 
-  h_min = 0.0_dp ; if (present(hmin)) h_min = hmin
+        h_min = 0.0_dp; if (present(hmin)) h_min = hmin
 
-  if (present(hin)) then
-    !$OMP parallel do default(shared)
-    do k=1,GV%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
-      h(i,j,k) = max( hin(i,j,k) - dt * G%IareaT(i,j) * (uh(I,j,k) - uh(I-1,j,k)), h_min )
-    enddo ; enddo ; enddo
-  else
-    !$OMP parallel do default(shared)
-    do k=1,GV%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
-      h(i,j,k) = max( h(i,j,k) - dt * G%IareaT(i,j) * (uh(I,j,k) - uh(I-1,j,k)), h_min )
-    enddo ; enddo ; enddo
-  endif
+        if (present(hin)) then
+            !$OMP parallel do 
+            do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
+                    h(i, j, k) = max(hin(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
+            end do; end do; end do
+        else
+            !$OMP parallel do 
+            do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
+                    h(i, j, k) = max(h(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
+                end do; end do; end do
+        end if
 
-end subroutine continuity_zonal_convergence
+    end subroutine continuity_zonal_convergence
 
 !> Set the reconstructed thicknesses at the eastern and western edges of tracer cells.
     subroutine zonal_edge_thickness(h_in, h_W, h_E, G, GV, CS)
@@ -200,7 +199,7 @@ end subroutine continuity_zonal_convergence
         nz = GV%ke
 
         if (CS%upwind_1st) then
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, nz
                 do j = jsh, jeh
                     do i = ish - 1, ieh + 1
@@ -210,7 +209,7 @@ end subroutine continuity_zonal_convergence
                 end do
             end do
         else
-            !$OMP parallel do default(shared)
+            !$OMP parallel do 
             do k = 1, nz
                 call PPM_reconstruction_x(h_in(:, :, k), h_W(:, :, k), h_E(:, :, k), G, &
                                           2.0*GV%Angstrom_H, CS%monotonic, CS%simple_2nd)
@@ -646,7 +645,7 @@ end subroutine continuity_zonal_convergence
         jeh = G%jec
         nz = GV%ke
 
-        !$OMP parallel do default(shared) private(CFL,curv_3,h_marg,h_avg)
+        !$OMP parallel do private(CFL,curv_3,h_marg,h_avg)
         do k = 1, nz
             do j = jsh, jeh
                 do I = ish - 1, ieh
@@ -690,7 +689,7 @@ end subroutine continuity_zonal_convergence
             ! Scale back the thickness to account for the effects of viscosity and the fractional open
             ! thickness to give an appropriate non-normalized weight for each layer in determining the
             ! barotropic acceleration.
-            !$OMP parallel do default(shared)
+            !$OMP parallel do
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh
@@ -699,7 +698,7 @@ end subroutine continuity_zonal_convergence
                 end do
             end do
         else
-            !$OMP parallel do default(shared)
+            !$OMP parallel do
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh

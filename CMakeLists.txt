@@ -51,7 +51,7 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
   message(STATUS "Detected Intel Fortran compiler")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -heap-arrays")
   if(OpenMP_Fortran_FOUND)
     set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${OpenMP_Fortran_FLAGS}")
   endif()

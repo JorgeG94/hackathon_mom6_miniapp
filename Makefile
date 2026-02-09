@@ -57,7 +57,7 @@ else ifneq (,$(findstring gfortran,$(FC)))
   MODFLAG = -J
 else ifneq (,$(findstring ifx,$(FC)))
   # Intel ifx (CPU with OpenMP)
-  FFLAGS = -O3 -qopenmp
+  FFLAGS = -O3 -qopenmp -heap-arrays
   LDFLAGS = -qopenmp
   MODFLAG = -module
 else ifneq (,$(findstring flang-new,$(FC)))
@@ -69,6 +69,10 @@ else ifneq (,$(findstring flang-new,$(FC)))
     FFLAGS = -O3 -fopenmp
     LDFLAGS = -fopenmp
   endif
+  MODFLAG = -J
+else ifneq (,$(findstring lfortran,$(FC)))
+  FFLAGS = -O3 --cpp --openmp
+  LDFLAGS = 
   MODFLAG = -J
 else
   # Default flags
