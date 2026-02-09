@@ -155,6 +155,7 @@ contains
 
         ! Initialize uniform grid metrics
 #ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(to:G)
         !$omp target enter data map(alloc: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$omp target enter data map(alloc: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
