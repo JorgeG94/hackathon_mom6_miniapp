@@ -42,7 +42,7 @@ BUILDDIR = build
 ifneq (,$(findstring nvfortran,$(FC)))
   ifeq ($(GPU),yes)
     # NVIDIA GPU offloading with OpenMP target + stdpar
-    FFLAGS = -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -Minfo=accel -gpu=mem:separate
+    FFLAGS = -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -gpu=mem:separate
     LDFLAGS = -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -cudalib=nvtx
   else
     # CPU-only with OpenMP

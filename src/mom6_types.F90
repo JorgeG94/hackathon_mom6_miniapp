@@ -292,6 +292,11 @@ contains
 
         allocate (BT_cont%h_u(isd:ied, jsd:jed, 1:nz), source=0._dp)
 
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(to: BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0, &
+        !$omp&                          BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE, BT_cont%h_u)
+#endif
+
     end subroutine alloc_BT_cont_type
 
 !> Deallocates the arrays contained within a BT_cont_type.
@@ -299,6 +304,11 @@ contains
         type(BT_cont_type), pointer :: BT_cont !< The BT_cont_type whose elements will be deallocated.
 
         if (.not. associated(BT_cont)) return
+
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target exit data map(delete: BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0, &
+        !$omp&                              BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE, BT_cont%h_u)
+#endif
 
         if (allocated(BT_cont%FA_u_WW)) deallocate (BT_cont%FA_u_WW)
         if (allocated(BT_cont%FA_u_W0)) deallocate (BT_cont%FA_u_W0)

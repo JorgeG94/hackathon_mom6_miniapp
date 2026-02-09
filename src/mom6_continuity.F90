@@ -642,6 +642,11 @@ contains
                                        du_max_CFL, du_min_CFL, dt, G, GV, CS, visc_rem, &
                                        visc_rem_max, j, ish, ieh, do_I, por_face_areaU)
             end do
+#ifdef __NVCOMPILER_LLVM__
+            ! Sync BT_cont arrays from CPU to GPU after Block 3
+            !$omp target update to(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0, &
+            !$omp&                 BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
+#endif
         end if
 
         if (set_BT_cont) then
@@ -653,6 +658,10 @@ contains
                     call zonal_flux_thickness(u, h_in, h_W, h_E, BT_cont%h_u, dt, G, GV, &
                                               CS%vol_CFL, CS%marginal_faces, por_face_areaU, visc_rem_u)
                 end if
+#ifdef __NVCOMPILER_LLVM__
+                ! Sync BT_cont%h_u from CPU to GPU
+                !$omp target update to(BT_cont%h_u)
+#endif
             end if
         end if
 
