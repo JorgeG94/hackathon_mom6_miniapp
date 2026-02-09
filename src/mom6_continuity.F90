@@ -48,6 +48,7 @@ module mom6_continuity
         ! GPU work arrays (persistent, device-mapped)
         real(dp), allocatable :: h_W(:,:,:)  !< West edge thickness [H], 3D
         real(dp), allocatable :: h_E(:,:,:)  !< East edge thickness [H], 3D
+        real(dp), allocatable :: duhdu(:,:,:) !< Partial derivative of uh w.r.t. u [H L], 3D
     end type continuity_CS
 
 contains
@@ -69,9 +70,10 @@ contains
         ! GPU work arrays
         allocate (CS%h_W(G%isd:G%ied, G%jsd:G%jed, GV%ke))
         allocate (CS%h_E(G%isd:G%ied, G%jsd:G%jed, GV%ke))
+        allocate (CS%duhdu(G%isd:G%ied, G%jsd:G%jed, GV%ke))
 
 #ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: CS%h_W, CS%h_E)
+        !$omp target enter data map(alloc: CS%h_W, CS%h_E, CS%duhdu)
         !$omp target enter data map(alloc: uhbt, u_cor, du_cor)
         !$omp target enter data map(to: por_face_areaU, visc_rem_u)
 #endif
@@ -99,13 +101,14 @@ contains
         if (.not. CS%initialized) return
 
 #ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%h_W, CS%h_E)
+        !$omp target exit data map(delete: CS%h_W, CS%h_E, CS%duhdu)
         !$omp target exit data map(delete: uhbt, u_cor, du_cor)
         !$omp target exit data map(delete: por_face_areaU, visc_rem_u)
 #endif
 
         if (allocated(CS%h_W)) deallocate (CS%h_W)
         if (allocated(CS%h_E)) deallocate (CS%h_E)
+        if (allocated(CS%duhdu)) deallocate (CS%duhdu)
         if (allocated(uhbt)) deallocate (uhbt)
         if (allocated(u_cor)) deallocate (u_cor)
         if (allocated(du_cor)) deallocate (du_cor)
@@ -237,7 +240,7 @@ contains
             intent(out)   :: uh   !< Volume flux through zonal faces = u*h*dy
                                                  !! [H L2 T-1 ~> m3 s-1 or kg s-1].
         real(dp), intent(in)    :: dt   !< Time increment [T ~> s].
-        type(continuity_CS), intent(in)    :: CS   !< This module's control structure.
+        type(continuity_CS), intent(inout) :: CS   !< This module's control structure (inout for GPU arrays).
 !   type(ocean_OBC_type),    pointer       :: OBC  !< Open boundaries control structure.
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
             intent(in)    :: por_face_areaU !< fractional open area of U-faces [nondim]
@@ -280,6 +283,7 @@ contains
         real(dp) :: I_dt    ! 1.0 / dt [T-1 ~> s-1].
         real(dp) :: du_lim  ! The velocity change that give a relative CFL of 1 [L T-1 ~> m s-1].
         real(dp) :: dx_E, dx_W ! Effective x-grid spacings to the east and west [L ~> m].
+        real(dp) :: CFL_loc, curv_3_loc, h_marg_loc, visc_rem_loc ! Local scalars for do concurrent
         integer :: i, j, k, ish, ieh, jsh, jeh, n, nz
 !   integer :: l_seg ! The OBC segment number
         logical :: use_visc_rem, set_BT_cont
@@ -302,28 +306,54 @@ contains
         I_dt = 1.0/dt
         if (CS%aggress_adjust) CFL_dt = I_dt
 
-        if (.not. use_visc_rem) visc_rem(:, :) = 1.0
+        ! Compute uh and duhdu via inlined zonal_flux_layer (3D do concurrent)
+        do concurrent (k = 1:nz, j = jsh:jeh, I = ish - 1:ieh)
+            ! Get visc_rem for this point
+            if (use_visc_rem) then
+                visc_rem_loc = visc_rem_u(I, j, k)
+            else
+                visc_rem_loc = 1.0_dp
+            end if
+
+            ! Compute flux based on velocity sign (inlined zonal_flux_layer)
+            if (u(I, j, k) > 0.0_dp) then
+                if (CS%vol_CFL) then
+                    CFL_loc = (u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i, j))
+                else
+                    CFL_loc = u(I, j, k)*dt*G%IdxT(i, j)
+                end if
+                curv_3_loc = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp*h_in(i, j, k)
+                uh(I, j, k) = (G%dy_Cu(I, j)*por_face_areaU(I, j, k))*u(I, j, k)* &
+                    (h_E(i, j, k) + CFL_loc*(0.5_dp*(h_W(i, j, k) - h_E(i, j, k)) + curv_3_loc*(CFL_loc - 1.5_dp)))
+                h_marg_loc = h_E(i, j, k) + CFL_loc*((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp*curv_3_loc*(CFL_loc - 1.0_dp))
+            else if (u(I, j, k) < 0.0_dp) then
+                if (CS%vol_CFL) then
+                    CFL_loc = (-u(I, j, k)*dt)*(G%dy_Cu(I, j)*G%IareaT(i + 1, j))
+                else
+                    CFL_loc = -u(I, j, k)*dt*G%IdxT(i + 1, j)
+                end if
+                curv_3_loc = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp*h_in(i + 1, j, k)
+                uh(I, j, k) = (G%dy_Cu(I, j)*por_face_areaU(I, j, k))*u(I, j, k)* &
+                    (h_W(i + 1, j, k) + CFL_loc*(0.5_dp*(h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3_loc*(CFL_loc - 1.5_dp)))
+                h_marg_loc = h_W(i + 1, j, k) + CFL_loc*((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp*curv_3_loc*(CFL_loc - 1.0_dp))
+            else
+                uh(I, j, k) = 0.0_dp
+                h_marg_loc = 0.5_dp*(h_W(i + 1, j, k) + h_E(i, j, k))
+            end if
+            CS%duhdu(I, j, k) = (G%dy_Cu(I, j)*por_face_areaU(I, j, k))*h_marg_loc*visc_rem_loc
+        end do
+
+        ! The rest of zonal_mass_flux uses local arrays which remain on CPU for now
+        if (.not. use_visc_rem) visc_rem(:, :) = 1.0_dp
         do j = jsh, jeh
-            do I = ish - 1, ieh
-                do_I(I) = .true.
-            end do
-            ! Set uh and duhdu.
-            do k = 1, nz
-                if (use_visc_rem) then
+            ! Fill visc_rem for this row if needed (for Newton iteration code below)
+            if (use_visc_rem) then
+                do k = 1, nz
                     do I = ish - 1, ieh
                         visc_rem(I, k) = visc_rem_u(I, j, k)
                     end do
-                end if
-                call zonal_flux_layer(u(:, j, k), h_in(:, j, k), h_W(:, j, k), h_E(:, j, k), &
-                                      uh(:, j, k), duhdu(:, k), visc_rem(:, k), &
-                                      dt, G, j, ish, ieh, do_I, CS%vol_CFL, por_face_areaU(:, j, k))
-                ! if (local_specified_BC) then
-                !   do I=ish-1,ieh ; if (OBC%segnum_u(I,j) /= 0) then
-                !     l_seg = abs(OBC%segnum_u(I,j))
-                !     if (OBC%segment(l_seg)%specified) uh(I,j,k) = OBC%segment(l_seg)%normal_trans(I,j,k)
-                !   endif ; enddo
-                ! endif
-            end do
+                end do
+            end if
 
             if (present(uhbt) .or. set_BT_cont) then
                 if (use_visc_rem .and. CS%use_visc_rem_max) then
@@ -355,7 +385,7 @@ contains
                 end do
                 do k = 1, nz
                     do I = ish - 1, ieh
-                        duhdu_tot_0(I) = duhdu_tot_0(I) + duhdu(I, k)
+                        duhdu_tot_0(I) = duhdu_tot_0(I) + CS%duhdu(I, j, k)
                         uh_tot_0(I) = uh_tot_0(I) + uh(I, j, k)
                     end do
                 end do
