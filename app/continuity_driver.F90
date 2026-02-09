@@ -91,8 +91,8 @@ program continuity_driver
     end do
 
 #ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: h)
-    !$omp target exit data map(delete: hin, u, uh, uhbt, u_cor, du_cor)
+    !$omp target exit data map(from: h, hin)
+    !$omp target exit data map(delete: u, uh)
 #endif
 
     print '(A)', ''

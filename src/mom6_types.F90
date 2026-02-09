@@ -156,7 +156,7 @@ contains
         ! Initialize uniform grid metrics
 #ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
+        !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$omp target enter data map(alloc: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target enter data map(alloc: G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target enter data map(alloc: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
@@ -180,6 +180,7 @@ contains
                 G%IdyT(i, j) = 1.0_dp/dx_m
                 G%dxCu(i, j) = dx_m
                 G%dyCu(i, j) = dx_m
+                G%dy_Cu(i, j) = dx_m  ! Unblocked face length
                 G%IdxCu(i, j) = 1.0_dp/dx_m
                 G%IdyCu(i, j) = 1.0_dp/dx_m
                 G%dxCv(i, j) = dx_m
@@ -208,7 +209,7 @@ contains
         ! Copy grid data from host to device
 #ifdef __NVCOMPILER_LLVM__
         !$omp target update to(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target update to(G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
+        !$omp target update to(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$omp target update to(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target update to(G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target update to(G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
@@ -225,7 +226,7 @@ contains
 
 #ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target exit data map(delete: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
+        !$omp target exit data map(delete: G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$omp target exit data map(delete: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$omp target exit data map(delete: G%IareaBu, G%areaBu, G%CoriolisBu)
         !$omp target exit data map(delete: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)

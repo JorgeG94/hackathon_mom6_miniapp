@@ -45,6 +45,9 @@ module mom6_continuity
                                  !! continuity solver for use as the weights in the
                                  !! barotropic solver.  Otherwise use the transport
                                  !! averaged areas.
+        ! GPU work arrays (persistent, device-mapped)
+        real(dp), allocatable :: h_W(:,:,:)  !< West edge thickness [H], 3D
+        real(dp), allocatable :: h_E(:,:,:)  !< East edge thickness [H], 3D
     end type continuity_CS
 
 contains
@@ -63,8 +66,18 @@ contains
         allocate (por_face_areaU(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
         allocate (visc_rem_u(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
 
+        ! GPU work arrays
+        allocate (CS%h_W(G%isd:G%ied, G%jsd:G%jed, GV%ke))
+        allocate (CS%h_E(G%isd:G%ied, G%jsd:G%jed, GV%ke))
+
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target enter data map(alloc: CS%h_W, CS%h_E)
+        !$omp target enter data map(alloc: uhbt, u_cor, du_cor)
+        !$omp target enter data map(to: por_face_areaU, visc_rem_u)
+#endif
+
         CS%initialized = .true.
-        CS%upwind_1st = .false.
+        CS%upwind_1st = .true.  ! Use upwind for GPU (PPM needs more work)
         CS%simple_2nd = .false.
         CS%tol_eta = 1.d-12
         CS%tol_vel = 3.d8
@@ -85,6 +98,14 @@ contains
 
         if (.not. CS%initialized) return
 
+#ifdef __NVCOMPILER_LLVM__
+        !$omp target exit data map(delete: CS%h_W, CS%h_E)
+        !$omp target exit data map(delete: uhbt, u_cor, du_cor)
+        !$omp target exit data map(delete: por_face_areaU, visc_rem_u)
+#endif
+
+        if (allocated(CS%h_W)) deallocate (CS%h_W)
+        if (allocated(CS%h_E)) deallocate (CS%h_E)
         if (allocated(uhbt)) deallocate (uhbt)
         if (allocated(u_cor)) deallocate (u_cor)
         if (allocated(du_cor)) deallocate (du_cor)
@@ -105,7 +126,7 @@ contains
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(inout) :: h  ! Final thickness [H]
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: uh  ! Zonal flux [H L2 T-1]
         real(dp), intent(in) :: dt        ! Time step [T]
-        type(continuity_CS), intent(in) :: CS
+        type(continuity_CS), intent(inout) :: CS  ! inout for GPU work arrays
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in)  :: por_face_areaU !< pointers to porous barrier fractional cell metrics
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(in)    :: uhbt !< The summed volume flux through zonal faces
                                                       !! [H L2 T-1 ~> m3 s-1 or kg s-1].
@@ -121,22 +142,10 @@ contains
                                  !!  the effective open face areas as a function of barotropic flow.
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(out)   :: du_cor !< The zonal velocity increments from u that give uhbt
                                                       !! as the depth-integrated transports [L T-1 ~> m s-1].
-        ! Local variables
-        real(dp) :: h_W(G%isd:G%ied, G%jsd:G%jed, GV%ke) ! West edge thicknesses in the zonal PPM reconstruction [H ~> m or kg m-2]
-        real(dp) :: h_E(G%isd:G%ied, G%jsd:G%jed, GV%ke) ! East edge thicknesses in the zonal PPM reconstruction [H ~> m or kg m-2]
-        real(dp) :: h_min  ! The minimum layer thickness [H ~> m or kg m-2].  h_min could be 0.
 
-        integer :: is, ie, js, je, nz
-
-        is = G%isc
-        ie = G%iec
-        js = G%jsc
-        je = G%jec
-        nz = GV%ke
-
-        ! advect zonally
-        call zonal_edge_thickness(hin, h_W, h_E, G, GV, CS)
-        call zonal_mass_flux(u, hin, h_W, h_E, uh, dt, G, GV, CS, por_face_areaU, &
+        ! advect zonally (using CS%h_W, CS%h_E as GPU-mapped work arrays)
+        call zonal_edge_thickness(hin, CS%h_W, CS%h_E, G, GV, CS)
+        call zonal_mass_flux(u, hin, CS%h_W, CS%h_E, uh, dt, G, GV, CS, por_face_areaU, &
                              uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
         call continuity_zonal_convergence(h, uh, dt, G, GV, hin)
 
@@ -164,15 +173,13 @@ contains
         h_min = 0.0_dp; if (present(hmin)) h_min = hmin
 
         if (present(hin)) then
-            !$OMP parallel do 
-            do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
-                    h(i, j, k) = max(hin(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
-            end do; end do; end do
+            do concurrent (k = 1:GV%ke, j = G%jsc:G%jec, i = G%isc:G%iec)
+                h(i, j, k) = max(hin(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
+            end do
         else
-            !$OMP parallel do 
-            do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
-                    h(i, j, k) = max(h(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
-                end do; end do; end do
+            do concurrent (k = 1:GV%ke, j = G%jsc:G%jec, i = G%isc:G%iec)
+                h(i, j, k) = max(h(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
+            end do
         end if
 
     end subroutine continuity_zonal_convergence
@@ -199,14 +206,9 @@ contains
         nz = GV%ke
 
         if (CS%upwind_1st) then
-            !$OMP parallel do 
-            do k = 1, nz
-                do j = jsh, jeh
-                    do i = ish - 1, ieh + 1
-                        h_W(i, j, k) = h_in(i, j, k)
-                        h_E(i, j, k) = h_in(i, j, k)
-                    end do
-                end do
+            do concurrent (k = 1:nz, j = jsh:jeh, i = ish - 1:ieh + 1)
+                h_W(i, j, k) = h_in(i, j, k)
+                h_E(i, j, k) = h_in(i, j, k)
             end do
         else
             !$OMP parallel do 
