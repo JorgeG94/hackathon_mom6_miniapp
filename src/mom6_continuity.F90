@@ -49,6 +49,12 @@ module mom6_continuity
         real(dp), allocatable :: h_W(:,:,:)  !< West edge thickness [H], 3D
         real(dp), allocatable :: h_E(:,:,:)  !< East edge thickness [H], 3D
         real(dp), allocatable :: duhdu(:,:,:) !< Partial derivative of uh w.r.t. u [H L], 3D
+        ! Pre-Newton setup arrays (2D, for do concurrent)
+        real(dp), allocatable :: visc_rem_max(:,:)  !< Column max of visc_rem [nondim]
+        real(dp), allocatable :: du_max_CFL(:,:)    !< Upper CFL limit on du [L T-1]
+        real(dp), allocatable :: du_min_CFL(:,:)    !< Lower CFL limit on du [L T-1]
+        real(dp), allocatable :: uh_tot_0(:,:)      !< Summed transport at du=0 [H L2 T-1]
+        real(dp), allocatable :: duhdu_tot_0(:,:)   !< Summed duhdu at du=0 [H L]
     end type continuity_CS
 
 contains
@@ -67,13 +73,21 @@ contains
         allocate (por_face_areaU(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
         allocate (visc_rem_u(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
 
-        ! GPU work arrays
+        ! GPU work arrays (3D)
         allocate (CS%h_W(G%isd:G%ied, G%jsd:G%jed, GV%ke))
         allocate (CS%h_E(G%isd:G%ied, G%jsd:G%jed, GV%ke))
         allocate (CS%duhdu(G%isd:G%ied, G%jsd:G%jed, GV%ke))
+        ! Pre-Newton setup arrays (2D)
+        allocate (CS%visc_rem_max(G%isd:G%ied, G%jsd:G%jed))
+        allocate (CS%du_max_CFL(G%isd:G%ied, G%jsd:G%jed))
+        allocate (CS%du_min_CFL(G%isd:G%ied, G%jsd:G%jed))
+        allocate (CS%uh_tot_0(G%isd:G%ied, G%jsd:G%jed))
+        allocate (CS%duhdu_tot_0(G%isd:G%ied, G%jsd:G%jed))
 
 #ifdef __NVCOMPILER_LLVM__
         !$omp target enter data map(alloc: CS%h_W, CS%h_E, CS%duhdu)
+        !$omp target enter data map(alloc: CS%visc_rem_max, CS%du_max_CFL, CS%du_min_CFL)
+        !$omp target enter data map(alloc: CS%uh_tot_0, CS%duhdu_tot_0)
         !$omp target enter data map(alloc: uhbt, u_cor, du_cor)
         !$omp target enter data map(to: por_face_areaU, visc_rem_u)
 #endif
@@ -102,6 +116,8 @@ contains
 
 #ifdef __NVCOMPILER_LLVM__
         !$omp target exit data map(delete: CS%h_W, CS%h_E, CS%duhdu)
+        !$omp target exit data map(delete: CS%visc_rem_max, CS%du_max_CFL, CS%du_min_CFL)
+        !$omp target exit data map(delete: CS%uh_tot_0, CS%duhdu_tot_0)
         !$omp target exit data map(delete: uhbt, u_cor, du_cor)
         !$omp target exit data map(delete: por_face_areaU, visc_rem_u)
 #endif
@@ -109,6 +125,11 @@ contains
         if (allocated(CS%h_W)) deallocate (CS%h_W)
         if (allocated(CS%h_E)) deallocate (CS%h_E)
         if (allocated(CS%duhdu)) deallocate (CS%duhdu)
+        if (allocated(CS%visc_rem_max)) deallocate (CS%visc_rem_max)
+        if (allocated(CS%du_max_CFL)) deallocate (CS%du_max_CFL)
+        if (allocated(CS%du_min_CFL)) deallocate (CS%du_min_CFL)
+        if (allocated(CS%uh_tot_0)) deallocate (CS%uh_tot_0)
+        if (allocated(CS%duhdu_tot_0)) deallocate (CS%duhdu_tot_0)
         if (allocated(uhbt)) deallocate (uhbt)
         if (allocated(u_cor)) deallocate (u_cor)
         if (allocated(du_cor)) deallocate (du_cor)
@@ -284,7 +305,8 @@ contains
         real(dp) :: du_lim  ! The velocity change that give a relative CFL of 1 [L T-1 ~> m s-1].
         real(dp) :: dx_E, dx_W ! Effective x-grid spacings to the east and west [L ~> m].
         real(dp) :: CFL_loc, curv_3_loc, h_marg_loc, visc_rem_loc ! Local scalars for do concurrent
-        integer :: i, j, k, ish, ieh, jsh, jeh, n, nz
+        real(dp) :: I_vrm_loc, dx_W_loc, dx_E_loc, du_lim_loc, visc_rem_k ! Block 1 do concurrent locals
+        integer :: i, j, k, ish, ieh, jsh, jeh, n, nz, k_loc
 !   integer :: l_seg ! The OBC segment number
         logical :: use_visc_rem, set_BT_cont
 !   logical :: simple_OBC_pt(G%isd:G%ied)  ! Indicates points in a row with specified transport OBCs
@@ -335,7 +357,8 @@ contains
                 curv_3_loc = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp*h_in(i + 1, j, k)
                 uh(I, j, k) = (G%dy_Cu(I, j)*por_face_areaU(I, j, k))*u(I, j, k)* &
                     (h_W(i + 1, j, k) + CFL_loc*(0.5_dp*(h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3_loc*(CFL_loc - 1.5_dp)))
-                h_marg_loc = h_W(i + 1, j, k) + CFL_loc*((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp*curv_3_loc*(CFL_loc - 1.0_dp))
+                h_marg_loc = h_W(i + 1, j, k) + CFL_loc*((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
+                    3.0_dp*curv_3_loc*(CFL_loc - 1.0_dp))
             else
                 uh(I, j, k) = 0.0_dp
                 h_marg_loc = 0.5_dp*(h_W(i + 1, j, k) + h_E(i, j, k))
@@ -343,10 +366,121 @@ contains
             CS%duhdu(I, j, k) = (G%dy_Cu(I, j)*por_face_areaU(I, j, k))*h_marg_loc*visc_rem_loc
         end do
 
-        ! The rest of zonal_mass_flux uses local arrays which remain on CPU for now
+        ! ============================================================================
+        ! Block 1: Pre-Newton setup as do concurrent(j, I)
+        ! Computes CS%visc_rem_max, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0
+        ! ============================================================================
+        if (present(uhbt) .or. set_BT_cont) then
+            do concurrent (j = jsh:jeh, I = ish - 1:ieh)
+                ! Compute visc_rem_max for this (j, I) column
+                if (use_visc_rem .and. CS%use_visc_rem_max) then
+                    CS%visc_rem_max(I, j) = 0.0_dp
+                    do k_loc = 1, nz
+                        CS%visc_rem_max(I, j) = max(CS%visc_rem_max(I, j), visc_rem_u(I, j, k_loc))
+                    end do
+                else
+                    CS%visc_rem_max(I, j) = 1.0_dp
+                end if
+
+                ! Set initial CFL limits
+                I_vrm_loc = 0.0_dp
+                if (CS%visc_rem_max(I, j) > 0.0_dp) I_vrm_loc = 1.0_dp / CS%visc_rem_max(I, j)
+                if (CS%vol_CFL) then
+                    dx_W_loc = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
+                    dx_E_loc = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
+                else
+                    dx_W_loc = G%dxT(i, j)
+                    dx_E_loc = G%dxT(i + 1, j)
+                end if
+                CS%du_max_CFL(I, j) = 2.0_dp*(CFL_dt*dx_W_loc)*I_vrm_loc
+                CS%du_min_CFL(I, j) = -2.0_dp*(CFL_dt*dx_E_loc)*I_vrm_loc
+
+                ! Compute uh_tot_0 and duhdu_tot_0 (k-reduction)
+                CS%uh_tot_0(I, j) = 0.0_dp
+                CS%duhdu_tot_0(I, j) = 0.0_dp
+                do k_loc = 1, nz
+                    CS%uh_tot_0(I, j) = CS%uh_tot_0(I, j) + uh(I, j, k_loc)
+                    CS%duhdu_tot_0(I, j) = CS%duhdu_tot_0(I, j) + CS%duhdu(I, j, k_loc)
+                end do
+
+                ! CFL refinement (4-branch logic based on use_visc_rem and aggress_adjust)
+                if (use_visc_rem) then
+                    if (CS%aggress_adjust) then
+                        do k_loc = 1, nz
+                            visc_rem_k = visc_rem_u(I, j, k_loc)
+                            if (CS%vol_CFL) then
+                                dx_W_loc = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
+                                dx_E_loc = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
+                            else
+                                dx_W_loc = G%dxT(i, j)
+                                dx_E_loc = G%dxT(i + 1, j)
+                            end if
+                            du_lim_loc = 0.499_dp*((dx_W_loc*I_dt - u(I, j, k_loc)) + MIN(0.0_dp, u(I - 1, j, k_loc)))
+                            if (CS%du_max_CFL(I, j)*visc_rem_k > du_lim_loc) &
+                                CS%du_max_CFL(I, j) = du_lim_loc / visc_rem_k
+                            du_lim_loc = 0.499_dp*((-dx_E_loc*I_dt - u(I, j, k_loc)) + MAX(0.0_dp, u(I + 1, j, k_loc)))
+                            if (CS%du_min_CFL(I, j)*visc_rem_k < du_lim_loc) &
+                                CS%du_min_CFL(I, j) = du_lim_loc / visc_rem_k
+                        end do
+                    else
+                        do k_loc = 1, nz
+                            visc_rem_k = visc_rem_u(I, j, k_loc)
+                            if (CS%vol_CFL) then
+                                dx_W_loc = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
+                                dx_E_loc = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
+                            else
+                                dx_W_loc = G%dxT(i, j)
+                                dx_E_loc = G%dxT(i + 1, j)
+                            end if
+                            if (CS%du_max_CFL(I, j)*visc_rem_k > dx_W_loc*CFL_dt - u(I, j, k_loc)*G%mask2dCu(I, j)) &
+                                CS%du_max_CFL(I, j) = (dx_W_loc*CFL_dt - u(I, j, k_loc)) / visc_rem_k
+                            if (CS%du_min_CFL(I, j)*visc_rem_k < -dx_E_loc*CFL_dt - u(I, j, k_loc)*G%mask2dCu(I, j)) &
+                                CS%du_min_CFL(I, j) = -(dx_E_loc*CFL_dt + u(I, j, k_loc)) / visc_rem_k
+                        end do
+                    end if
+                else
+                    if (CS%aggress_adjust) then
+                        do k_loc = 1, nz
+                            if (CS%vol_CFL) then
+                                dx_W_loc = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
+                                dx_E_loc = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
+                            else
+                                dx_W_loc = G%dxT(i, j)
+                                dx_E_loc = G%dxT(i + 1, j)
+                            end if
+                            CS%du_max_CFL(I, j) = MIN(CS%du_max_CFL(I, j), 0.499_dp* &
+                                ((dx_W_loc*I_dt - u(I, j, k_loc)) + MIN(0.0_dp, u(I - 1, j, k_loc))))
+                            CS%du_min_CFL(I, j) = MAX(CS%du_min_CFL(I, j), 0.499_dp* &
+                                ((-dx_E_loc*I_dt - u(I, j, k_loc)) + MAX(0.0_dp, u(I + 1, j, k_loc))))
+                        end do
+                    else
+                        do k_loc = 1, nz
+                            if (CS%vol_CFL) then
+                                dx_W_loc = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
+                                dx_E_loc = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
+                            else
+                                dx_W_loc = G%dxT(i, j)
+                                dx_E_loc = G%dxT(i + 1, j)
+                            end if
+                            CS%du_max_CFL(I, j) = MIN(CS%du_max_CFL(I, j), dx_W_loc*CFL_dt - u(I, j, k_loc))
+                            CS%du_min_CFL(I, j) = MAX(CS%du_min_CFL(I, j), -(dx_E_loc*CFL_dt + u(I, j, k_loc)))
+                        end do
+                    end if
+                end if
+
+                ! Final clamping
+                CS%du_max_CFL(I, j) = max(CS%du_max_CFL(I, j), 0.0_dp)
+                CS%du_min_CFL(I, j) = min(CS%du_min_CFL(I, j), 0.0_dp)
+            end do
+        end if
+
+        ! ============================================================================
+        ! Block 2 & 3: Newton iteration and BT_cont (still sequential j-loop)
+        ! Copy from CS 2D arrays to 1D locals for zonal_flux_adjust/set_zonal_BT_cont
+        ! ============================================================================
         if (.not. use_visc_rem) visc_rem(:, :) = 1.0_dp
         do j = jsh, jeh
-            ! Fill visc_rem for this row if needed (for Newton iteration code below)
+            ! Fill visc_rem for this row (still needed for zonal_flux_adjust)
             if (use_visc_rem) then
                 do k = 1, nz
                     do I = ish - 1, ieh
@@ -356,132 +490,15 @@ contains
             end if
 
             if (present(uhbt) .or. set_BT_cont) then
-                if (use_visc_rem .and. CS%use_visc_rem_max) then
-                    visc_rem_max(:) = 0.0_dp
-                    do k = 1, nz
-                        do I = ish - 1, ieh
-                            visc_rem_max(I) = max(visc_rem_max(I), visc_rem(I, k))
-                        end do
-                    end do
-                else
-                    visc_rem_max(:) = 1.0
-                end if
-                !   Set limits on du that will keep the CFL number between -1 and 1.
-                ! This should be adequate to keep the root bracketed in all cases.
+                ! Copy from CS 2D arrays to 1D locals for zonal_flux_adjust/set_zonal_BT_cont
                 do I = ish - 1, ieh
-                    I_vrm = 0.0_dp
-                    if (visc_rem_max(I) > 0.0_dp) I_vrm = 1.0/visc_rem_max(I)
-                    if (CS%vol_CFL) then
-                        dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0*G%dxT(i, j))
-                        dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0*G%dxT(i + 1, j))
-                    else
-                        dx_W = G%dxT(i, j)
-                        dx_E = G%dxT(i + 1, j)
-                    end if
-                    du_max_CFL(I) = 2.0*(CFL_dt*dx_W)*I_vrm
-                    du_min_CFL(I) = -2.0*(CFL_dt*dx_E)*I_vrm
-                    uh_tot_0(I) = 0.0_dp
-                    duhdu_tot_0(I) = 0.0_dp
-                end do
-                do k = 1, nz
-                    do I = ish - 1, ieh
-                        duhdu_tot_0(I) = duhdu_tot_0(I) + CS%duhdu(I, j, k)
-                        uh_tot_0(I) = uh_tot_0(I) + uh(I, j, k)
-                    end do
-                end do
-                if (use_visc_rem) then
-                    if (CS%aggress_adjust) then
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
-
-                            du_lim = 0.499_dp*((dx_W*I_dt - u(I, j, k)) + MIN(0.0_dp, u(I - 1, j, k)))
-                            if (du_max_CFL(I)*visc_rem(I, k) > du_lim) &
-                                du_max_CFL(I) = du_lim/visc_rem(I, k)
-
-                            du_lim = 0.499_dp*((-dx_E*I_dt - u(I, j, k)) + MAX(0.0_dp, u(I + 1, j, k)))
-                            if (du_min_CFL(I)*visc_rem(I, k) < du_lim) &
-                                du_min_CFL(I) = du_lim/visc_rem(I, k)
-                            end do
-                        end do
-                    else
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
-
-                            if (du_max_CFL(I)*visc_rem(I, k) > dx_W*CFL_dt - u(I, j, k)*G%mask2dCu(I, j)) &
-                                du_max_CFL(I) = (dx_W*CFL_dt - u(I, j, k))/visc_rem(I, k)
-                            if (du_min_CFL(I)*visc_rem(I, k) < -dx_E*CFL_dt - u(I, j, k)*G%mask2dCu(I, j)) &
-                                du_min_CFL(I) = -(dx_E*CFL_dt + u(I, j, k))/visc_rem(I, k)
-                            end do
-                        end do
-                    end if
-                else
-                    if (CS%aggress_adjust) then
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
-
-                            du_max_CFL(I) = MIN(du_max_CFL(I), 0.499_dp* &
-                                                ((dx_W*I_dt - u(I, j, k)) + MIN(0.0_dp, u(I - 1, j, k))))
-                            du_min_CFL(I) = MAX(du_min_CFL(I), 0.499_dp* &
-                                                ((-dx_E*I_dt - u(I, j, k)) + MAX(0.0_dp, u(I + 1, j, k))))
-                            end do
-                        end do
-                    else
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
-
-                            du_max_CFL(I) = MIN(du_max_CFL(I), dx_W*CFL_dt - u(I, j, k))
-                            du_min_CFL(I) = MAX(du_min_CFL(I), -(dx_E*CFL_dt + u(I, j, k)))
-                            end do
-                        end do
-                    end if
-                end if
-                do I = ish - 1, ieh
-                    du_max_CFL(I) = max(du_max_CFL(I), 0.0_dp)
-                    du_min_CFL(I) = min(du_min_CFL(I), 0.0_dp)
-                end do
-
-                ! any_simple_OBC = .false.
-                if (present(uhbt) .or. set_BT_cont) then
-                    !   if (local_specified_BC .or. local_Flather_OBC) then ; do I=ish-1,ieh
-                    !     l_seg = abs(OBC%segnum_u(I,j))
-
-                    !     ! Avoid reconciling barotropic/baroclinic transports if transport is specified
-                    !     simple_OBC_pt(I) = .false.
-                    !     if (l_seg /= OBC_NONE) simple_OBC_pt(I) = OBC%segment(l_seg)%specified
-                    !     do_I(I) = .not.simple_OBC_pt(I)
-                    !     any_simple_OBC = any_simple_OBC .or. simple_OBC_pt(I)
-                    !   enddo ; else ; do I=ish-1,ieh
+                    uh_tot_0(I) = CS%uh_tot_0(I, j)
+                    duhdu_tot_0(I) = CS%duhdu_tot_0(I, j)
+                    du_max_CFL(I) = CS%du_max_CFL(I, j)
+                    du_min_CFL(I) = CS%du_min_CFL(I, j)
+                    visc_rem_max(I) = CS%visc_rem_max(I, j)
                     do_I(I) = .true.
-                    !   enddo ; endif
-                end if
+                end do
 
                 if (present(uhbt)) then
                     ! Find du and uh.
@@ -1377,7 +1394,7 @@ contains
     end subroutine PPM_limit_CW84
 
     !> Return the maximum ratio of a/b or maxrat.
-    function ratio_max(a, b, maxrat) result(ratio)
+    pure function ratio_max(a, b, maxrat) result(ratio)
         real(dp), intent(in) :: a       !< Numerator, in arbitrary units [A]
         real(dp), intent(in) :: b       !< Denominator, in arbitrary units [B]
         real(dp), intent(in) :: maxrat  !< Maximum value of ratio [A B-1]
