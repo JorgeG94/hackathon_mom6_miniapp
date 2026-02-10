@@ -54,6 +54,16 @@ make FC=gfortran GPU=no
 make FC=ifx GPU=no
 ```
 
+### Vertical viscosity loop ordering variant
+```bash
+make VERTVISC_VARIANT=jki   # j outer, k middle, i inner (best CPU cache)
+make VERTVISC_VARIANT=jik   # j-i outer, k inner (default, GPU-friendly)
+make VERTVISC_VARIANT=ijk   # i-j outer, k inner (reversed do concurrent)
+make VERTVISC_VARIANT=ikj   # i outer, k middle, j inner
+make VERTVISC_VARIANT=kji   # k outer, j-i inner (level-wise, 2D slabs)
+make VERTVISC_VARIANT=kij   # k outer, i-j inner (level-wise, reversed)
+```
+
 ### Disable profiler entirely (zero overhead)
 ```bash
 make DISABLE_PROFILER=yes
@@ -210,38 +220,59 @@ Demonstrates vorticity and Coriolis acceleration calculation:
 
 ### Vertical Viscosity Mini-App
 
-Demonstrates the implicit vertical viscosity solver from `MOM_vert_friction.F90`:
+Demonstrates the implicit vertical viscosity solver from `MOM_vert_friction.F90`.
 
-1. **find_coupling_coef** - Compute viscous coupling coefficients at interfaces
+Uses **Fortran submodules** to explore the effect of loop ordering on performance. The parent module (`mom6_vert_visc.F90`) declares interfaces; the computational subroutines are implemented in interchangeable submodule files selected at build time via `VERTVISC_VARIANT`.
+
+**Three subroutines, each with U-point and V-point blocks:**
+
+1. **vert_visc_coef** - Compute viscous coupling coefficients at interfaces
    ```fortran
-   ! Accumulate viscosity contributions
+   ! Harmonic-mean thickness (bottom-up) + coupling coefficients (top-down)
    Kv_tot = Kv_interior
    if (z_from_top < Hmix) Kv_tot = Kv_tot + (Kv_ml - Kv) * topfn
    if (z_from_bot < 2*Hbbl) Kv_tot = Kv_tot + (Kv_bbl - Kv) * botfn
-   ! botfn = 1 / (1 + 0.09 * z_norm^6)  [MOM6 BBL transition]
    a_cpl = Kv_tot / h_shear
    ```
 
-2. **vertvisc_remnant** - Compute momentum remnant fraction for BT coupling
+2. **vert_visc_remnant** - Compute momentum remnant fraction for BT coupling
    ```fortran
-   ! Tridiagonal inversion with unit forcing
-   do concurrent (j=js:je, i=is:ie)
-     ! Forward elimination + back substitution
-     ! visc_rem(k) = fraction of BT acceleration retained by layer k
-   end do
+   ! Schopf & Loughe tridiagonal with unit forcing
+   ! visc_rem(k) = fraction of BT acceleration retained by layer k
    ```
 
-3. **Tridiagonal Solver** - Apply implicit viscosity
+3. **vert_visc_apply** - Apply implicit viscosity (tridiagonal solver)
    ```fortran
    ! Solve: h(k)*u_new = h(k)*u_old + dt*a(k+1)*(u_new(k+1)-u_new(k))
    !                                - dt*a(k)*(u_new(k)-u_new(k-1))
-   do concurrent (j=js:je, i=is:ie)
-     ! Forward elimination (k=1 to nz)
-     ! Back substitution (k=nz-1 to 1)
-   end do
+   ! With surface wind stress BC, Rayleigh drag, bottom stress output
    ```
 
-**GPU Pattern:** Each horizontal column (i,j) is independent - parallelize over columns with `collapse(2)`, sequential tridiagonal solve in k.
+**Loop Ordering Variants:**
+
+Each column (i,j) is independent — k is always sequential (tridiagonal dependency). The key performance variable is **where k sits in the loop nest**, which controls memory access patterns on Fortran column-major arrays where `array(i,j,k)` has i contiguous.
+
+| Variant | Loop nest | Inner access pattern | Workspace |
+|---------|-----------|---------------------|-----------|
+| `jik` | `do concurrent(j,i)` → `do k` | `a(i_fix, j_fix, k)` stride ni×nj | Scalars per column |
+| `ijk` | `do concurrent(i,j)` → `do k` | Same as jik, reversed DC order | Scalars per column |
+| `jki` | `!$OMP do j` → `do k` → `do i` | `a(i, j_fix, k_fix)` **contiguous** | 1D arrays over i |
+| `ikj` | `!$OMP do i` → `do k` → `do j` | `a(i_fix, j, k_fix)` stride ni | 1D arrays over j |
+| `kji` | `do k` → `do concurrent(j,i)` | `a(i, j, k_fix)` 2D slab | 2D/3D allocatable |
+| `kij` | `do k` → `do concurrent(i,j)` | Same as kji, reversed DC order | 2D/3D allocatable |
+
+**CPU performance (gfortran -O3, 90×90×75, 3 iters):**
+
+| Variant | Time (s) | Speedup vs baseline |
+|---------|----------|---------------------|
+| **jki** | **0.022** | **8.3×** |
+| kji     | 0.133    | 1.4× |
+| kij     | 0.133    | 1.4× |
+| jik     | 0.183    | 1.0× (baseline) |
+| ijk     | 0.186    | 0.98× |
+| ikj     | 0.232    | 0.79× |
+
+`jki` wins on CPU because i innermost = contiguous memory access. `jik` is the natural GPU ordering (one thread per column). Select with `make VERTVISC_VARIANT=jki` (or `jik`, etc.).
 
 ### Horizontal Viscosity Mini-App
 
@@ -586,7 +617,13 @@ mom6_types.F90          (base types: ocean_grid_type, verticalGrid_type)
     ├── mom6_continuity.F90 (PPM continuity solver)
     ├── mom6_coriolis.F90   (Coriolis/momentum advection)
     ├── mom6_barotropic.F90 (fast barotropic solver)
-    ├── mom6_vert_visc.F90  (vertical viscosity)
+    ├── mom6_vert_visc.F90  (vertical viscosity — parent module with interfaces)
+    │   ├── mom6_vert_visc_jik.F90  (submodule: j-i outer, k inner)
+    │   ├── mom6_vert_visc_ijk.F90  (submodule: i-j outer, k inner)
+    │   ├── mom6_vert_visc_jki.F90  (submodule: j outer, k middle, i inner)
+    │   ├── mom6_vert_visc_ikj.F90  (submodule: i outer, k middle, j inner)
+    │   ├── mom6_vert_visc_kji.F90  (submodule: k outer, j-i inner)
+    │   └── mom6_vert_visc_kij.F90  (submodule: k outer, i-j inner)
     ├── mom6_hor_visc.F90   (horizontal viscosity)
     │
     └── mom6_diag.F90       (simplified diagnostics)
@@ -605,8 +642,14 @@ hackathon_mom6_miniapp/
 │   ├── mom6_continuity.F90  # PPM continuity solver
 │   ├── mom6_coriolis.F90    # Coriolis acceleration
 │   ├── mom6_barotropic.F90  # Barotropic solver
-│   ├── mom6_vert_visc.F90   # Vertical viscosity
-│   └── mom6_hor_visc.F90    # Horizontal viscosity
+│   ├── mom6_vert_visc.F90       # Vertical viscosity (parent module)
+│   ├── mom6_vert_visc_jik.F90   # Submodule: j-i outer, k inner (GPU baseline)
+│   ├── mom6_vert_visc_ijk.F90   # Submodule: i-j outer, k inner
+│   ├── mom6_vert_visc_jki.F90   # Submodule: j outer, k mid, i inner (best CPU)
+│   ├── mom6_vert_visc_ikj.F90   # Submodule: i outer, k mid, j inner
+│   ├── mom6_vert_visc_kji.F90   # Submodule: k outer, j-i inner (2D slabs)
+│   ├── mom6_vert_visc_kij.F90   # Submodule: k outer, i-j inner
+│   └── mom6_hor_visc.F90        # Horizontal viscosity
 ├── app/
 │   ├── rk2_driver.F90       # Unified RK2 driver (main benchmark)
 │   ├── continuity_driver.F90
@@ -623,8 +666,12 @@ hackathon_mom6_miniapp/
 
 ### Quick Test Commands
 ```bash
-# CPU build and test
-make clean && make FC=gfortran GPU=no
+# CPU build with best loop ordering for vertical viscosity
+make clean && make FC=gfortran GPU=no VERTVISC_VARIANT=jki
+./rk2_driver 180 180 75 10 30
+
+# GPU build (default jik ordering)
+make clean && make FC=nvfortran GPU=yes VERTVISC_VARIANT=jik
 ./rk2_driver 180 180 75 10 30
 
 # GPU build with NVTX (for Nsight profiling)
@@ -634,6 +681,12 @@ nsys profile ./rk2_driver 360 360 75 10 30
 # GPU benchmarking (diagnostics disabled for accurate timing)
 ./rk2_driver 720 720 75 10 50       # Diagnostics OFF (default)
 ./rk2_driver 720 720 75 10 50 1     # Diagnostics ON
+
+# Build all 6 vert_visc variants for comparison
+for v in jik ijk jki ikj kji kij; do
+  make clean -s && make FC=gfortran GPU=no VERTVISC_VARIANT=$v vert_visc_driver -s
+  mv vert_visc_driver vert_visc_driver_$v
+done
 
 # Check build configuration
 make info

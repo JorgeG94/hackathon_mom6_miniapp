@@ -33,6 +33,14 @@ NVTX ?= no
 # Disable profiler entirely (default: no)
 DISABLE_PROFILER ?= no
 
+# Vertical viscosity loop ordering variant (jik, ijk, jki, ikj, kji, kij)
+# Default: jik for GPU (one thread per column), jki for CPU (stride-1 inner loop)
+ifeq ($(GPU),yes)
+  VERTVISC_VARIANT ?= jik
+else
+  VERTVISC_VARIANT ?= jki
+endif
+
 # Directories
 SRCDIR = src
 APPDIR = app
@@ -98,17 +106,25 @@ endif
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
 
-# Module objects
+# Vertical viscosity submodule source
+VERTVISC_SUBMOD_SRC = $(SRCDIR)/mom6_vert_visc_$(VERTVISC_VARIANT).F90
+
+# Module objects (includes vert_visc submodule)
 MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
           $(BUILDDIR)/mom6_continuity.o \
           $(BUILDDIR)/mom6_coriolis.o $(BUILDDIR)/mom6_barotropic.o \
-          $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_hor_visc.o \
+          $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_vert_visc_sub.o \
+          $(BUILDDIR)/mom6_hor_visc.o \
           $(BUILDDIR)/mom6_diag.o
 
 # Driver executables
 DRIVERS = continuity_driver coriolis_driver barotropic_driver vert_visc_driver hor_visc_driver rk2_driver
 
-.PHONY: all clean info run-continuity run-coriolis run-barotropic run-vert-visc run-rk2 run-all
+# All vertical viscosity loop ordering variants
+VERTVISC_VARIANTS = jik ijk jki ikj kji kij
+
+.PHONY: all clean info run-continuity run-coriolis run-barotropic run-vert-visc run-rk2 run-all \
+        vertvisc-all run-vertvisc-all
 
 all: $(BUILDDIR) $(DRIVERS)
 
@@ -137,6 +153,9 @@ $(BUILDDIR)/mom6_barotropic.o: $(SRCDIR)/mom6_barotropic.F90 $(BUILDDIR)/mom6_ty
 $(BUILDDIR)/mom6_vert_visc.o: $(SRCDIR)/mom6_vert_visc.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
+$(BUILDDIR)/mom6_vert_visc_sub.o: $(VERTVISC_SUBMOD_SRC) $(BUILDDIR)/mom6_vert_visc.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
 $(BUILDDIR)/mom6_hor_visc.o: $(SRCDIR)/mom6_hor_visc.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
@@ -156,8 +175,8 @@ coriolis_driver: $(APPDIR)/coriolis_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDD
 barotropic_driver: $(APPDIR)/barotropic_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(LDFLAGS)
 
-vert_visc_driver: $(APPDIR)/vert_visc_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o $(LDFLAGS)
+vert_visc_driver: $(APPDIR)/vert_visc_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_vert_visc_sub.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_vert_visc_sub.o $(LDFLAGS)
 
 hor_visc_driver: $(APPDIR)/hor_visc_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(LDFLAGS)
@@ -170,7 +189,7 @@ rk2_driver: $(APPDIR)/rk2_driver.F90 $(MODULES)
 #==============================================================================
 
 clean:
-	rm -f $(DRIVERS) *.o *.mod
+	rm -f $(DRIVERS) $(foreach v,$(VERTVISC_VARIANTS),vert_visc_driver_$(v)) *.o *.mod
 	rm -rf $(BUILDDIR)
 
 info:
@@ -181,6 +200,7 @@ info:
 	@echo "GPU:      $(GPU)"
 	@echo "NVTX:     $(NVTX)"
 	@echo "DISABLE_PROFILER: $(DISABLE_PROFILER)"
+	@echo "VERTVISC_VARIANT: $(VERTVISC_VARIANT)"
 	@echo "FFLAGS:   $(FFLAGS)"
 	@echo "LDFLAGS:  $(LDFLAGS)"
 	@echo "========================================"
@@ -247,6 +267,51 @@ run-all: $(DRIVERS)
 	@echo "Running RK2 Driver"
 	@echo "========================================"
 	./rk2_driver 180 180 75 10 30
+
+#==============================================================================
+# Scaling tests
+#==============================================================================
+
+#==============================================================================
+# Vertical viscosity variant targets
+#==============================================================================
+
+vertvisc-all:
+	@echo "========================================"
+	@echo "Building all vertical viscosity variants"
+	@echo "Compiler: $(FC)  GPU: $(GPU)"
+	@echo "========================================"
+	@for v in $(VERTVISC_VARIANTS); do \
+		echo ""; \
+		echo "--- Building variant: $$v ---"; \
+		rm -rf $(BUILDDIR) $(DRIVERS); \
+		if $(MAKE) FC=$(FC) GPU=$(GPU) VERTVISC_VARIANT=$$v vert_visc_driver; then \
+			mv vert_visc_driver vert_visc_driver_$$v; \
+			echo "  -> vert_visc_driver_$$v"; \
+		else \
+			echo "  FAILED to build $$v"; \
+		fi; \
+	done
+	@echo ""
+	@echo "========================================"
+	@echo "Built executables:"
+	@ls -la vert_visc_driver_* 2>/dev/null || echo "  (none)"
+	@echo "========================================"
+
+run-vertvisc-all:
+	@echo "========================================"
+	@echo "Running all vertical viscosity variants"
+	@echo "========================================"
+	@for v in $(VERTVISC_VARIANTS); do \
+		if [ -f vert_visc_driver_$$v ]; then \
+			echo ""; \
+			echo "=== $$v ==="; \
+			./vert_visc_driver_$$v 180 180 75 5; \
+		else \
+			echo ""; \
+			echo "=== $$v === (not built, skipping)"; \
+		fi; \
+	done
 
 #==============================================================================
 # Scaling tests
