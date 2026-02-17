@@ -4,12 +4,7 @@ project(
   mom6_miniapps
   VERSION 1.0.0
   LANGUAGES Fortran
-  DESCRIPTION "MOM6 Mini-Apps for GPU Hackathon")
-
-# Options
-option(ENABLE_GPU "Enable GPU offloading" ON)
-option(ENABLE_NVTX "Enable NVTX profiling (NVIDIA only)" OFF)
-option(DISABLE_PROFILER "Disable profiler entirely" OFF)
+  DESCRIPTION "MOM6 Mini-Apps")
 
 # Set default build type
 if(NOT CMAKE_BUILD_TYPE)
@@ -18,53 +13,23 @@ if(NOT CMAKE_BUILD_TYPE)
       CACHE STRING "Build type" FORCE)
 endif()
 
-# Find OpenMP
-find_package(OpenMP)
-
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  if(ENABLE_GPU)
-    set(CMAKE_Fortran_FLAGS
-        "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=mem:separate"
-    )
-    # Detect GPU architecture
-    if(NOT DEFINED GPU_ARCH)
-      set(GPU_ARCH
-          "cc70"
-          CACHE STRING "GPU architecture (e.g., cc70, cc80, cc90)")
-    endif()
-    set(CMAKE_Fortran_FLAGS
-        "${CMAKE_Fortran_FLAGS} -gpu=${GPU_ARCH} -Minfo=accel")
-  else()
-    set(CMAKE_Fortran_FLAGS
-        "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore -Minfo=opt -stdpar=multicore")
-  endif()
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
   set(CMAKE_Fortran_FLAGS
       "${CMAKE_Fortran_FLAGS} -O3 -fallow-argument-mismatch")
-  if(OpenMP_Fortran_FOUND)
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${OpenMP_Fortran_FLAGS}")
-  endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
   message(STATUS "Detected Intel Fortran compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -heap-arrays")
-  if(OpenMP_Fortran_FOUND)
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${OpenMP_Fortran_FLAGS}")
-  endif()
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Flang")
   message(STATUS "Detected Flang compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3")
-  if(ENABLE_GPU)
-    set(CMAKE_Fortran_FLAGS
-        "${CMAKE_Fortran_FLAGS} -fopenmp -fopenmp-targets=nvptx64")
-  elseif(OpenMP_Fortran_FOUND)
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${OpenMP_Fortran_FLAGS}")
-  endif()
 
 else()
   message(WARNING "Unknown compiler: ${CMAKE_Fortran_COMPILER_ID}")
@@ -87,20 +52,6 @@ add_library(
   src/mom6_vert_visc.F90
   src/mom6_hor_visc.F90
   src/mom6_diag.F90)
-
-# Profiler preprocessor definitions
-if(ENABLE_NVTX)
-  target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
-  # NVTX requires -cudalib=nvtx for NVIDIA HPC compiler
-  if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
-    target_compile_options(mom6_modules PRIVATE -cudalib=nvtx)
-    target_link_options(mom6_modules PUBLIC -cudalib=nvtx)
-  endif()
-endif()
-
-if(DISABLE_PROFILER)
-  target_compile_definitions(mom6_modules PRIVATE DISABLE_PROFILER)
-endif()
 
 # Set module output directory
 set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
@@ -181,8 +132,5 @@ message(
   STATUS
     "Fortran compiler: ${CMAKE_Fortran_COMPILER_ID} (${CMAKE_Fortran_COMPILER})"
 )
-message(STATUS "GPU enabled:      ${ENABLE_GPU}")
-message(STATUS "NVTX profiling:   ${ENABLE_NVTX}")
-message(STATUS "Profiler disabled: ${DISABLE_PROFILER}")
 message(STATUS "Install prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")

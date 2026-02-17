@@ -71,17 +71,12 @@ contains
         allocate (CS%c(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%d(G%isd:G%ied, G%jsd:G%jed))
 
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: CS)
-        !$omp target enter data map(alloc: CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort)
-        !$omp target enter data map(alloc: CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, CS%Area_q)
-        !$omp target enter data map(alloc: CS%KE, CS%a, CS%b, CS%c, CS%d)
-#endif
-
         ! Precompute Area_q (sum of 4 neighboring h-cell areas)
-        do concurrent(j=G%jsd:G%jed - 1, i=G%isd:G%ied - 1)
+        do j=G%jsd,G%jed - 1
+        do i=G%isd,G%ied - 1
             CS%Area_q(i, j) = (G%areaT(i, j) + G%areaT(i + 1, j + 1)) + &
                               (G%areaT(i + 1, j) + G%areaT(i, j + 1))
+        end do
         end do
 
         CS%initialized = .true.
@@ -93,12 +88,6 @@ contains
         type(coriolis_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort)
-        !$omp target exit data map(delete: CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, CS%Area_q)
-        !$omp target exit data map(delete: CS%KE, CS%a, CS%b, CS%c, CS%d)
-#endif
 
         if (allocated(CS%dvdx)) deallocate (CS%dvdx)
         if (allocated(CS%dudy)) deallocate (CS%dudy)
@@ -142,93 +131,119 @@ contains
         do k = 1, nz
 
             ! Compute circulation terms
-            do concurrent(j=js - 1:je, i=is - 1:ie)
+            do j=js - 1,je
+            do i=is - 1,ie
                 CS%dvdx(i, j) = (v(i + 1, j, k)*G%dyCv(i + 1, j)) - (v(i, j, k)*G%dyCv(i, j))
                 CS%dudy(i, j) = (u(i, j + 1, k)*G%dxCu(i, j + 1)) - (u(i, j, k)*G%dxCu(i, j))
             end do
-
-            ! Compute thickness-weighted areas at velocity points
-            do concurrent(j=js - 1:je, i=is:ie + 1)
-                CS%hArea_v(i, j) = 0.5_dp*((G%areaT(i, j)*h(i, j, k)) + (G%areaT(i, j + 1)*h(i, j + 1, k)))
             end do
 
-            do concurrent(j=js:je + 1, i=is - 1:ie)
+            ! Compute thickness-weighted areas at velocity points
+            do j=js - 1,je
+            do i=is,ie + 1
+                CS%hArea_v(i, j) = 0.5_dp*((G%areaT(i, j)*h(i, j, k)) + (G%areaT(i, j + 1)*h(i, j + 1, k)))
+            end do
+            end do
+
+            do j=js,je + 1
+            do i=is - 1,ie
                 CS%hArea_u(i, j) = 0.5_dp*((G%areaT(i, j)*h(i, j, k)) + (G%areaT(i + 1, j)*h(i + 1, j, k)))
+            end do
             end do
 
             ! Compute vorticity and potential vorticity
-            do concurrent(j=js - 1:je, i=is - 1:ie)
+            do j=js - 1,je
+            do i=is - 1,ie
                 CS%rel_vort(i, j) = G%mask2dBu(i, j)*(CS%dvdx(i, j) - CS%dudy(i, j))*G%IareaBu(i, j)
                 CS%abs_vort(i, j) = G%CoriolisBu(i, j) + CS%rel_vort(i, j)
             end do
+            end do
 
-            do concurrent(j=js - 1:je, i=is - 1:ie)
+            do j=js - 1,je
+            do i=is - 1,ie
                 hArea_q = (CS%hArea_u(i, j) + CS%hArea_u(i, j + 1)) + (CS%hArea_v(i, j) + CS%hArea_v(i + 1, j))
                 CS%Ih_q(i, j) = CS%Area_q(i, j)/(hArea_q + vol_neglect)
                 CS%q(i, j) = CS%abs_vort(i, j)*CS%Ih_q(i, j)
             end do
+            end do
 
             ! Compute Arakawa scheme coefficients if needed
             if (CS%Coriolis_Scheme == ARAKAWA_HSU90) then
-                do concurrent(j=js:je, i=is - 1:ie)
+                do j=js,je
+                do i=is - 1,ie
                     CS%a(i, j) = (CS%q(i, j) + (CS%q(i + 1, j) + CS%q(i, j - 1)))*C1_12
                     CS%d(i, j) = ((CS%q(i, j) + CS%q(i + 1, j - 1)) + CS%q(i, j - 1))*C1_12
                 end do
-                do concurrent(j=js:je, i=is:ie)
+                end do
+                do j=js,je
+                do i=is,ie
                     CS%b(i, j) = (CS%q(i, j) + (CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_12
                     CS%c(i, j) = ((CS%q(i, j) + CS%q(i - 1, j - 1)) + CS%q(i, j - 1))*C1_12
                 end do
+                end do
             elseif (CS%Coriolis_Scheme == ARAKAWA_LAMB81) then
-                do concurrent(j=js:je, i=is:ie)
+                do j=js,je
+                do i=is,ie
                     CS%a(i - 1, j) = (2.0_dp*(CS%q(i, j) + CS%q(i - 1, j - 1)) + (CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_24
                     CS%d(i - 1, j) = ((CS%q(i, j) + CS%q(i - 1, j - 1)) + 2.0_dp*(CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_24
                     CS%b(i, j) = ((CS%q(i, j) + CS%q(i - 1, j - 1)) + 2.0_dp*(CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_24
                     CS%c(i, j) = (2.0_dp*(CS%q(i, j) + CS%q(i - 1, j - 1)) + (CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_24
                 end do
+                end do
             end if
 
             ! Compute kinetic energy
-            do concurrent(j=js:je, i=is:ie)
+            do j=js,je
+            do i=is,ie
                 CS%KE(i, j) = 0.25_dp*( &
                               (G%dyCu(i, j)*u(i, j, k)**2 + G%dyCu(i - 1, j)*u(i - 1, j, k)**2) + &
                               (G%dxCv(i, j)*v(i, j, k)**2 + G%dxCv(i, j - 1)*v(i, j - 1, k)**2) &
                               )/G%areaT(i, j)
             end do
+            end do
 
             ! Compute Coriolis accelerations based on scheme
             if (CS%Coriolis_Scheme == SADOURNY75_ENERGY) then
                 ! Energy-conserving Sadourny (1975) scheme
-                do concurrent(j=js:je, i=is:ie - 1)
+                do j=js,je
+                do i=is,ie - 1
                     KEx = (CS%KE(i + 1, j) - CS%KE(i, j))*G%IdxCu(i, j)
                     CAu(i, j, k) = 0.25_dp*( &
                                    (CS%q(i, j)*(vh(i + 1, j, k) + vh(i, j, k))) + &
                                    (CS%q(i, j - 1)*(vh(i, j - 1, k) + vh(i + 1, j - 1, k))) &
                                    )*G%IdxCu(i, j) - KEx
                 end do
+                end do
 
-                do concurrent(j=js:je - 1, i=is:ie)
+                do j=js,je - 1
+                do i=is,ie
                     KEy = (CS%KE(i, j + 1) - CS%KE(i, j))*G%IdyCv(i, j)
                     CAv(i, j, k) = -0.25_dp*( &
                                    (CS%q(i - 1, j)*(uh(i - 1, j, k) + uh(i - 1, j + 1, k))) + &
                                    (CS%q(i, j)*(uh(i, j, k) + uh(i, j + 1, k))) &
                                    )*G%IdyCv(i, j) - KEy
                 end do
+                end do
 
             else  ! ARAKAWA_HSU90 or ARAKAWA_LAMB81
-                do concurrent(j=js:je, i=is:ie - 1)
+                do j=js,je
+                do i=is,ie - 1
                     KEx = (CS%KE(i + 1, j) - CS%KE(i, j))*G%IdxCu(i, j)
                     CAu(i, j, k) = ( &
                                    ((CS%a(i, j)*vh(i + 1, j, k)) + (CS%c(i, j)*vh(i, j - 1, k))) + &
                                    ((CS%b(i, j)*vh(i, j, k)) + (CS%d(i, j)*vh(i + 1, j - 1, k))) &
                                    )*G%IdxCu(i, j) - KEx
                 end do
+                end do
 
-                do concurrent(j=js:je - 1, i=is:ie)
+                do j=js,je - 1
+                do i=is,ie
                     KEy = (CS%KE(i, j + 1) - CS%KE(i, j))*G%IdyCv(i, j)
                     CAv(i, j, k) = -( &
                                    ((CS%a(i - 1, j)*uh(i - 1, j, k)) + (CS%c(i, j + 1)*uh(i, j + 1, k))) + &
                                    ((CS%b(i, j)*uh(i, j, k)) + (CS%d(i - 1, j + 1)*uh(i - 1, j + 1, k))) &
                                    )*G%IdyCv(i, j) - KEy
+                end do
                 end do
             end if
 

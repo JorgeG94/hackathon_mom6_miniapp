@@ -102,18 +102,9 @@ contains
         allocate (CS%uhbt_av(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%vhbt_av(G%isd:G%ied, G%jsd:G%jed))
 
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: CS)
-        !$omp target enter data map(alloc: CS%eta, CS%eta_pred, CS%ubt, CS%vbt)
-        !$omp target enter data map(alloc: CS%ubt_prev, CS%vbt_prev, CS%uhbt, CS%vhbt)
-        !$omp target enter data map(alloc: CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
-        !$omp target enter data map(alloc: CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
-        !$omp target enter data map(alloc: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
-        !$omp target enter data map(alloc: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
-#endif
-
         ! Initialize grid-related arrays
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+        do i=G%isd,G%ied
             CS%Datu(i, j) = depth*G%dyCu(i, j)
             CS%Datv(i, j) = depth*G%dxCv(i, j)
             CS%gtot_E(i, j) = G_EARTH
@@ -123,9 +114,11 @@ contains
             CS%bt_rem_u(i, j) = 0.999_dp  ! Small drag
             CS%bt_rem_v(i, j) = 0.999_dp
         end do
+        end do
 
         ! Initialize Coriolis coefficients (f/4 at each corner)
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+        do i=G%isd,G%ied
             f0 = G%CoriolisBu(i, j)
             CS%f_4_u(1, i, j) = 0.25_dp*f0  ! SW
             CS%f_4_u(2, i, j) = 0.25_dp*f0  ! SE
@@ -135,6 +128,7 @@ contains
             CS%f_4_v(2, i, j) = 0.25_dp*f0
             CS%f_4_v(3, i, j) = 0.25_dp*f0
             CS%f_4_v(4, i, j) = 0.25_dp*f0
+        end do
         end do
 
         CS%initialized = .true.
@@ -146,15 +140,6 @@ contains
         type(barotropic_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%eta, CS%eta_pred, CS%ubt, CS%vbt)
-        !$omp target exit data map(delete: CS%ubt_prev, CS%vbt_prev, CS%uhbt, CS%vhbt)
-        !$omp target exit data map(delete: CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
-        !$omp target exit data map(delete: CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
-        !$omp target exit data map(delete: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
-        !$omp target exit data map(delete: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
-#endif
 
         if (allocated(CS%eta)) deallocate (CS%eta)
         if (allocated(CS%eta_pred)) deallocate (CS%eta_pred)
@@ -210,42 +195,54 @@ contains
         inv_nstep = 1.0_dp/real(CS%nstep, dp)
 
         ! Initialize from input
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+        do i=G%isd,G%ied
             CS%eta(i, j) = eta_in(i, j)
             CS%ubt(i, j) = ubt_in(i, j)
             CS%vbt(i, j) = vbt_in(i, j)
             CS%ubt_av(i, j) = 0.0_dp
             CS%vbt_av(i, j) = 0.0_dp
         end do
+        end do
 
         ! Barotropic time-stepping loop
         do n = 1, CS%nstep
 
             ! Store previous velocities
-            do concurrent(j=js:je, i=is - 1:ie + 1)
+            do j=js,je
+            do i=is - 1,ie + 1
                 CS%ubt_prev(i, j) = CS%ubt(i, j)
             end do
-            do concurrent(j=js - 1:je + 1, i=is:ie)
+            end do
+            do j=js - 1,je + 1
+            do i=is,ie
                 CS%vbt_prev(i, j) = CS%vbt(i, j)
+            end do
             end do
 
             ! Eta predictor
-            do concurrent(j=js:je, i=is:ie)
+            do j=js,je
+            do i=is,ie
                 CS%eta_pred(i, j) = CS%eta(i, j) + (CS%dtbt*G%IareaT(i, j))* &
                                     (((CS%Datu(i - 1, j)*CS%ubt(i - 1, j)) - (CS%Datu(i, j)*CS%ubt(i, j))) + &
                                      ((CS%Datv(i, j - 1)*CS%vbt(i, j - 1)) - (CS%Datv(i, j)*CS%vbt(i, j))))
             end do
+            end do
 
             ! Pressure force
-            do concurrent(j=js:je, i=is:ie - 1)
+            do j=js,je
+            do i=is,ie - 1
                 CS%PFu(i, j) = ((CS%eta_pred(i, j)*CS%gtot_E(i, j)) - &
                                 (CS%eta_pred(i + 1, j)*CS%gtot_W(i + 1, j)))* &
                                CS%dgeo_de*G%IdxCu(i, j)
             end do
-            do concurrent(j=js:je - 1, i=is:ie)
+            end do
+            do j=js,je - 1
+            do i=is,ie
                 CS%PFv(i, j) = ((CS%eta_pred(i, j)*CS%gtot_N(i, j)) - &
                                 (CS%eta_pred(i, j + 1)*CS%gtot_S(i, j + 1)))* &
                                CS%dgeo_de*G%IdyCv(i, j)
+            end do
             end do
 
             ! Alternating u/v update order
@@ -262,33 +259,45 @@ contains
             end if
 
             ! Compute transports and update eta
-            do concurrent(j=js:je, i=is:ie - 1)
+            do j=js,je
+            do i=is,ie - 1
                 CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
             end do
-            do concurrent(j=js:je - 1, i=is:ie)
+            end do
+            do j=js,je - 1
+            do i=is,ie
                 CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
             end do
+            end do
 
-            do concurrent(j=js:je, i=is:ie)
+            do j=js,je
+            do i=is,ie
                 CS%eta(i, j) = CS%eta(i, j) - CS%dtbt*G%IareaT(i, j)* &
                                ((CS%uhbt(i, j) - CS%uhbt(i - 1, j)) + (CS%vhbt(i, j) - CS%vhbt(i, j - 1)))
             end do
+            end do
 
             ! Accumulate time averages
-            do concurrent(j=js:je, i=is:ie - 1)
+            do j=js,je
+            do i=is,ie - 1
                 CS%ubt_av(i, j) = CS%ubt_av(i, j) + CS%ubt(i, j)*inv_nstep
             end do
-            do concurrent(j=js:je - 1, i=is:ie)
+            end do
+            do j=js,je - 1
+            do i=is,ie
                 CS%vbt_av(i, j) = CS%vbt_av(i, j) + CS%vbt(i, j)*inv_nstep
+            end do
             end do
 
         end do  ! substep loop
 
         ! Copy output
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+        do i=G%isd,G%ied
             u_av(i, j) = CS%ubt_av(i, j)
             v_av(i, j) = CS%vbt_av(i, j)
             eta_av(i, j) = CS%eta(i, j)
+        end do
         end do
 
     end subroutine btstep
@@ -302,15 +311,19 @@ contains
         integer :: i, j
 
         ! Coriolis for u
-        do concurrent(j=js:je, i=is:ie)
+        do j=js,je
+        do i=is,ie
             CS%Cor_u(i, j) = (((CS%f_4_u(4, i, j)*CS%vbt(i + 1, j)) + (CS%f_4_u(1, i, j)*CS%vbt(i, j - 1))) + &
                               ((CS%f_4_u(3, i, j)*CS%vbt(i, j)) + (CS%f_4_u(2, i, j)*CS%vbt(i + 1, j - 1))))
         end do
+        end do
 
         ! Update u
-        do concurrent(j=js:je, i=is:ie)
+        do j=js,je
+        do i=is,ie
             CS%ubt(i, j) = CS%bt_rem_u(i, j)*(CS%ubt(i, j) + &
                                               CS%dtbt*(CS%Cor_u(i, j) + CS%PFu(i, j)))
+        end do
         end do
 
     end subroutine update_u
@@ -324,15 +337,19 @@ contains
         integer :: i, j
 
         ! Coriolis for v
-        do concurrent(j=js:je, i=is:ie)
+        do j=js,je
+        do i=is,ie
             CS%Cor_v(i, j) = -1.0_dp*(((CS%f_4_v(1, i, j)*CS%ubt(i - 1, j)) + (CS%f_4_v(4, i, j)*CS%ubt(i, j + 1))) + &
                                       ((CS%f_4_v(2, i, j)*CS%ubt(i, j)) + (CS%f_4_v(3, i, j)*CS%ubt(i - 1, j + 1))))
         end do
+        end do
 
         ! Update v
-        do concurrent(j=js:je, i=is:ie)
+        do j=js,je
+        do i=is,ie
             CS%vbt(i, j) = CS%bt_rem_v(i, j)*(CS%vbt(i, j) + &
                                               CS%dtbt*(CS%Cor_v(i, j) + CS%PFv(i, j)))
+        end do
         end do
 
     end subroutine update_v

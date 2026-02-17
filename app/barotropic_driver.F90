@@ -1,6 +1,5 @@
 !> Standalone driver for the barotropic solver miniapp
 program barotropic_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid
     use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
@@ -15,6 +14,7 @@ program barotropic_driver
 
     real(dp) :: t_start, t_end, t_total, dt
     integer :: ni, nj, niter, iter, i, j, nsteps
+    integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
 
     ! Default parameters
@@ -56,12 +56,9 @@ program barotropic_driver
     allocate (eta_av(G%isd:G%ied, G%jsd:G%jed))
     allocate (eta_init(G%isd:G%ied, G%jsd:G%jed))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: eta_in, ubt_in, vbt_in, u_av, v_av, eta_av)
-#endif
-
     ! Initialize state with realistic patterns
-    do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+    do j=G%jsd,G%jed
+      do i=G%isd,G%ied
         ! Sea surface height anomaly (meters)
         eta_in(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(ni, dp)*3.14159_dp*2.0_dp)* &
                        cos(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)
@@ -69,11 +66,8 @@ program barotropic_driver
         ! Barotropic velocities (m/s)
         ubt_in(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp)
         vbt_in(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp)
+      end do
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(eta_in, ubt_in, vbt_in)
-#endif
 
     print '(A)', ''
     print '(A)', 'Running barotropic solver...'
@@ -82,24 +76,18 @@ program barotropic_driver
 
     do iter = 1, niter
         ! Reset initial conditions each iteration
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+          do i=G%isd,G%ied
             eta_in(i, j) = eta_init(i, j)
+          end do
         end do
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target update to(eta_in)
-#endif
 
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call btstep(eta_in, ubt_in, vbt_in, u_av, v_av, eta_av, G, CS)
-        t_end = omp_get_wtime()
+        call system_clock(clock_end)
 
-        t_total = t_total + (t_end - t_start)
+        t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: u_av, v_av, eta_av)
-    !$omp target exit data map(delete: eta_in, ubt_in, vbt_in)
-#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

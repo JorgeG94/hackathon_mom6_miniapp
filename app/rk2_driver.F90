@@ -16,7 +16,6 @@
 !!      - Final continuity update
 !!
 program rk2_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, G_EARTH, BT_cont_type, &
@@ -80,6 +79,7 @@ program rk2_driver
     real(dp) :: dt, t_start, t_end, t_total
     real(dp) :: t_coriolis, t_barotropic, t_continuity, t_vert_visc, t_hor_visc
     real(dp) :: t_diag
+    integer :: clock_start, clock_end, clock_rate
 
     ! Parameters
     integer :: ni, nj, nk, niter, bt_nsteps
@@ -192,12 +192,6 @@ program rk2_driver
     allocate (vbt_av(G%isd:G%ied, G%jsd:G%jed))
     allocate (eta_av(G%isd:G%ied, G%jsd:G%jed))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: u, v, h, h0, uh, vh, CAu, CAv, up, vp, htmp)
-    !$omp target enter data map(alloc: diffu, diffv)
-    !$omp target enter data map(alloc: eta, ubt, vbt, ubt_av, vbt_av, eta_av)
-#endif
-
     ! Initialize forces/visc data
     call initialize_forces_visc(forces, visc, G, GV)
 
@@ -219,13 +213,18 @@ program rk2_driver
     t_diag = 0.0_dp
     block
         real(dp) :: iter_start, iter_end
+        integer :: iter_clock_start, iter_clock_end, iter_clock_rate
         call profiler_start("RK2_step", nvtx_only=.true.)
         do iter = 1, niter
-            iter_start = omp_get_wtime()
+            call system_clock(iter_clock_start, iter_clock_rate)
 
             ! Reset to initial state for timing consistency
-            do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+            do k=1,nk
+              do j=G%jsd,G%jed
+                do i=G%isd,G%ied
                 h(i, j, k) = h0(i, j, k)
+                end do
+              end do
             end do
 
             !=========================================================================
@@ -239,67 +238,72 @@ program rk2_driver
 
             ! 2. Horizontal viscosity (before Coriolis, per MOM6 step_MOM_dyn_split_RK2)
             call profiler_start("HorVisc")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call hor_visc(u, v, h, diffu, diffv, G, GV, hvisc_CS, uh, vh)
-            t_end = omp_get_wtime()
-            t_hor_visc = t_hor_visc + (t_end - t_start)
+            call system_clock(clock_end)
+            t_hor_visc = t_hor_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("HorVisc")
 
             ! 3. Coriolis and momentum advection
             call profiler_start("Coriolis")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call CorAdCalc(u, v, h, uh, vh, CAu, CAv, G, GV, cor_CS)
-            t_end = omp_get_wtime()
-            t_coriolis = t_coriolis + (t_end - t_start)
+            call system_clock(clock_end)
+            t_coriolis = t_coriolis + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Coriolis")
 
             ! 4. Predictor velocity update (add Coriolis + horizontal viscosity accelerations)
             call profiler_start("VelUpdate_pred")
-            do concurrent(k=1:nk, j=G%jsc:G%jec, i=G%isc:G%iec - 1)
+            do k=1,nk
+              do j=G%jsc,G%jec
+                do i=G%isc,G%iec - 1
                 up(i, j, k) = u(i, j, k) + dt*(CAu(i, j, k) + diffu(i, j, k))
+                end do
+              end do
             end do
-            do concurrent(k=1:nk, j=G%jsc:G%jec - 1, i=G%isc:G%iec)
+            do k=1,nk
+              do j=G%jsc,G%jec - 1
+                do i=G%isc,G%iec
                 vp(i, j, k) = v(i, j, k) + dt*(CAv(i, j, k) + diffv(i, j, k))
+                end do
+              end do
             end do
             call profiler_stop("VelUpdate_pred")
 
             ! 5. Apply vertical viscosity to predictor velocities
             call profiler_start("VertVisc")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call vert_visc_coef(up, vp, h, visc_CS, G, GV)
             call vert_visc_apply(up, vp, h, dt, visc_CS, G, GV, forces, visc)
-            t_end = omp_get_wtime()
-            t_vert_visc = t_vert_visc + (t_end - t_start)
+            call system_clock(clock_end)
+            t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
             ! 6. Barotropic predictor step
             call profiler_start("Barotropic")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call btstep(eta, ubt, vbt, ubt_av, vbt_av, eta_av, G, bt_CS)
-            t_end = omp_get_wtime()
-            t_barotropic = t_barotropic + (t_end - t_start)
+            call system_clock(clock_end)
+            t_barotropic = t_barotropic + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Barotropic")
 
             ! 7. Continuity (update thicknesses)
             call profiler_start("Continuity")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call continuity_PPM(up, h0, h, uh, dt, G, GV, cont_CS, por_face_areaU, uhbt, &
                                 visc_rem_u, u_cor, BT_cont, du_cor)
-            t_end = omp_get_wtime()
-            t_continuity = t_continuity + (t_end - t_start)
+            call system_clock(clock_end)
+            t_continuity = t_continuity + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Continuity")
 
             ! Post predictor diagnostics (skip transfers if disabled)
             if (id_diffu_sum > 0 .or. id_diffv_sum > 0) then
                 call profiler_start("Diagnostics")
-                t_start = omp_get_wtime()
-#ifdef __NVCOMPILER_LLVM__
-                !$omp target update from(diffu, diffv, h)
-#endif
+                call system_clock(clock_start, clock_rate)
                 call post_product_sum_u(id_diffu_sum, diffu, h, G, nk, diag_CS)
                 call post_product_sum_v(id_diffv_sum, diffv, h, G, nk, diag_CS)
-                t_end = omp_get_wtime()
-                t_diag = t_diag + (t_end - t_start)
+                call system_clock(clock_end)
+                t_diag = t_diag + real(clock_end - clock_start, dp) / real(clock_rate, dp)
                 call profiler_stop("Diagnostics")
             end if
 
@@ -314,94 +318,89 @@ program rk2_driver
 
             ! 9. Horizontal viscosity with updated state
             call profiler_start("HorVisc")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call hor_visc(up, vp, h, diffu, diffv, G, GV, hvisc_CS, uh, vh)
-            t_end = omp_get_wtime()
-            t_hor_visc = t_hor_visc + (t_end - t_start)
+            call system_clock(clock_end)
+            t_hor_visc = t_hor_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("HorVisc")
 
             ! 10. Coriolis with updated state
             call profiler_start("Coriolis")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call CorAdCalc(up, vp, h, uh, vh, CAu, CAv, G, GV, cor_CS)
-            t_end = omp_get_wtime()
-            t_coriolis = t_coriolis + (t_end - t_start)
+            call system_clock(clock_end)
+            t_coriolis = t_coriolis + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Coriolis")
 
             ! 11. Final velocity update (RK2 average with Coriolis + horizontal viscosity)
             call profiler_start("VelUpdate_corr")
-            do concurrent(k=1:nk, j=G%jsc:G%jec, i=G%isc:G%iec - 1)
+            do k=1,nk
+              do j=G%jsc,G%jec
+                do i=G%isc,G%iec - 1
                 u(i, j, k) = u(i, j, k) + 0.5_dp*dt*(CAu(i, j, k) + diffu(i, j, k))
+                end do
+              end do
             end do
-            do concurrent(k=1:nk, j=G%jsc:G%jec - 1, i=G%isc:G%iec)
+            do k=1,nk
+              do j=G%jsc,G%jec - 1
+                do i=G%isc,G%iec
                 v(i, j, k) = v(i, j, k) + 0.5_dp*dt*(CAv(i, j, k) + diffv(i, j, k))
+                end do
+              end do
             end do
             call profiler_stop("VelUpdate_corr")
 
             ! 12. Apply vertical viscosity to corrector velocities
             call profiler_start("VertVisc")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call vert_visc_coef(u, v, h, visc_CS, G, GV)
             call vert_visc_apply(u, v, h, 0.5_dp*dt, visc_CS, G, GV, forces, visc)
-            t_end = omp_get_wtime()
-            t_vert_visc = t_vert_visc + (t_end - t_start)
+            call system_clock(clock_end)
+            t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
             ! 13. Barotropic corrector
             call profiler_start("Barotropic")
-            t_start = omp_get_wtime()
+            call system_clock(clock_start, clock_rate)
             call btstep(eta_av, ubt_av, vbt_av, ubt_av, vbt_av, eta, G, bt_CS)
-            t_end = omp_get_wtime()
-            t_barotropic = t_barotropic + (t_end - t_start)
+            call system_clock(clock_end)
+            t_barotropic = t_barotropic + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Barotropic")
 
             ! 14. Final continuity
             call profiler_start("Continuity")
-            t_start = omp_get_wtime()
-            do concurrent(k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%jed)
+            call system_clock(clock_start, clock_rate)
+            do k=1,GV%ke
+              do j=G%jsd,G%jed
+                do i=G%isd,G%jed
                 htmp(i, j, k) = h(i, j, k)
+                end do
+              end do
             end do
             call continuity_PPM(u, htmp, h, uh, 0.5_dp*dt, G, GV, cont_CS, por_face_areaU, uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
-            t_end = omp_get_wtime()
-            t_continuity = t_continuity + (t_end - t_start)
+            call system_clock(clock_end)
+            t_continuity = t_continuity + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Continuity")
 
             ! Post end-of-step diagnostics (only on last iteration, skip if disabled)
             if (iter == niter .and. (id_KE > 0 .or. id_mass > 0)) then
                 call profiler_start("Diagnostics")
-                t_start = omp_get_wtime()
-#ifdef __NVCOMPILER_LLVM__
-                !$omp target update from(u, v, h)
-#endif
+                call system_clock(clock_start, clock_rate)
                 call compute_and_post_KE(id_KE, u, v, h, G, GV, diag_CS)
                 call compute_and_post_mass(id_mass, h, G, GV, diag_CS)
-                t_end = omp_get_wtime()
-                t_diag = t_diag + (t_end - t_start)
+                call system_clock(clock_end)
+                t_diag = t_diag + real(clock_end - clock_start, dp) / real(clock_rate, dp)
                 call profiler_stop("Diagnostics")
             end if
-            iter_end = omp_get_wtime()
-            print '(A,I4,A,F10.6,A)', '  RK2 iteration ', iter, ':  ', iter_end - iter_start, ' s'
+            call system_clock(iter_clock_end)
+            print '(A,I4,A,F10.6,A)', '  RK2 iteration ', iter, ':  ', &
+                real(iter_clock_end - iter_clock_start, dp) / real(iter_clock_rate, dp), ' s'
 
         end do
     end block
     call profiler_stop("RK2_step")
 
     t_total = t_coriolis + t_barotropic + t_continuity + t_vert_visc + t_hor_visc + t_diag
-
-    ! Copy results back from device and delete temporary device arrays
-    call profiler_start("D2H_copy_results")
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: h, u, v, eta, h0)
-#endif
-    call profiler_stop("D2H_copy_results")
-
-    call profiler_start("GPU_dealloc_temps")
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(delete: uh, vh, CAu, CAv, up, vp)
-    !$omp target exit data map(delete: diffu, diffv)
-    !$omp target exit data map(delete: ubt, vbt, ubt_av, vbt_av, eta_av)
-#endif
-    call profiler_stop("GPU_dealloc_temps")
 
     print '(A)', '=================================================='
     print '(A)', 'Timing Results'
@@ -475,7 +474,9 @@ contains
 
         total_depth = 4000.0_dp
 
-        do concurrent(k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%ied)
+        do k=1,GV%ke
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             ! Layer thickness with baroclinic structure
             h0(i, j, k) = total_depth/real(GV%ke, dp) + &
                           10.0_dp*sin(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp)* &
@@ -488,19 +489,19 @@ contains
                          exp(-real(k, dp)/30.0_dp)
             v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp*2.0_dp)* &
                          exp(-real(k, dp)/30.0_dp)
+            end do
+          end do
         end do
 
         ! Sea surface height and barotropic velocities
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+          do i=G%isd,G%ied
             eta(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp*2.0_dp)* &
                         cos(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp*2.0_dp)
             ubt(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp)
             vbt(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp)
+          end do
         end do
-
-        ! NOTE: With -gpu=mem:separate, do NOT use "target update to" here!
-        ! The do concurrent loops above already computed values on the GPU.
-        ! A "target update to" would overwrite device data with uninitialized host data.
 
     end subroutine initialize_state
 
@@ -513,20 +514,28 @@ contains
         integer :: i, j, k
 
         ! Sinusoidal zonal wind stress (~0.1 Pa)
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+          do i=G%isd,G%ied
             forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(G%nj, dp) * 3.14159_dp)
             forces%tauy(i, j) = 0.0_dp
+          end do
         end do
 
         ! Rayleigh drag in bottom layer only
         if (visc%has_Rayleigh) then
-            do concurrent(k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%ied)
+            do k=1,GV%ke
+              do j=G%jsd,G%jed
+                do i=G%isd,G%ied
                 visc%Ray_u(i, j, k) = 0.0_dp
                 visc%Ray_v(i, j, k) = 0.0_dp
+                end do
+              end do
             end do
-            do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+            do j=G%jsd,G%jed
+              do i=G%isd,G%ied
                 visc%Ray_u(i, j, GV%ke) = 1.0e-4_dp
                 visc%Ray_v(i, j, GV%ke) = 1.0e-4_dp
+              end do
             end do
         end if
 
@@ -540,13 +549,14 @@ contains
 
         integer :: i, j, k
 
-        do concurrent(k=1:GV%ke, j=G%jsd:G%jed, i=G%isd:G%ied)
+        do k=1,GV%ke
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             uh(i, j, k) = u(i, j, k)*0.5_dp*(h(i, j, k) + h(min(i + 1, G%ied), j, k))*G%dyCu(i, j)
             vh(i, j, k) = v(i, j, k)*0.5_dp*(h(i, j, k) + h(i, min(j + 1, G%jed), k))*G%dxCv(i, j)
+            end do
+          end do
         end do
-
-        ! NOTE: With -gpu=mem:separate, do NOT use "target update to" here!
-        ! The do concurrent loop above already computed uh, vh on the GPU.
 
     end subroutine compute_transports
 
@@ -666,10 +676,14 @@ contains
         allocate (KE(G%isd:G%ied, G%jsd:G%jed, GV%ke))
 
         ! Compute KE = 0.5 * (u^2 + v^2) at h-points (simplified averaging)
-        do concurrent(k=1:GV%ke, j=G%jsc:G%jec, i=G%isc:G%iec)
+        do k=1,GV%ke
+          do j=G%jsc,G%jec
+            do i=G%isc,G%iec
             KE(i, j, k) = 0.5_dp*( &
                           0.5_dp*(u(i, j, k)**2 + u(i - 1, j, k)**2) + &
                           0.5_dp*(v(i, j, k)**2 + v(i, j - 1, k)**2))
+            end do
+          end do
         end do
 
         call post_data_3d(id, KE, G, GV, CS)
@@ -695,8 +709,10 @@ contains
 
         ! Sum layer thicknesses
         do k = 1, GV%ke
-            do concurrent(j=G%jsc:G%jec, i=G%isc:G%iec)
+            do j=G%jsc,G%jec
+              do i=G%isc,G%iec
                 mass(i, j) = mass(i, j) + h(i, j, k)
+              end do
             end do
         end do
 

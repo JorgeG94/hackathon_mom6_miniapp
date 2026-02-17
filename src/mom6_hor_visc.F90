@@ -1,8 +1,7 @@
 !> MOM6 Horizontal Viscosity Module
 !!
 !! Applies horizontal viscosity to momentum with realistic branching complexity.
-!! This version captures the "branching mess" of real MOM6's MOM_hor_visc.F90
-!! for GPU hackathon participants to work on realistic porting challenges.
+!! Based on real MOM6's MOM_hor_visc.F90.
 !!
 !! Supported schemes (controlled by flags):
 !!   - Laplacian: Simple 2nd-order viscosity (Kh)
@@ -18,9 +17,6 @@
 !!   no_slip:   sh_xy = (2 - mask) * (dvdx + dudy)  [doubled at boundaries]
 !!   free_slip: sh_xy = mask * (dvdx + dudy)        [zero at boundaries]
 !!
-!! GPU Pattern: Mixed GPU/CPU execution with explicit data transfers for Leith.
-!! This demonstrates the real challenge of porting MOM6 where some calculations
-!! cannot run efficiently on GPU due to extended halo requirements.
 !!
 module mom6_hor_visc
     use iso_fortran_env, only: dp => real64
@@ -211,7 +207,8 @@ contains
 
         ! Pre-compute metrics
         dx_m = G%dx
-        do concurrent(j=G%jsd:G%jed, i=G%isd:G%ied)
+        do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             ! Grid spacing squared
             CS%dx2h(i, j) = G%dxT(i, j)*G%dxT(i, j)
             CS%dy2h(i, j) = G%dyT(i, j)*G%dyT(i, j)
@@ -267,6 +264,7 @@ contains
             ! Leith biharmonic constants: C_leith * dx^6
             CS%Biharm6_const_xx(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
             CS%Biharm6_const_xy(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
+            end do
         end do
 
         ! Initialize work arrays to zero
@@ -282,9 +280,6 @@ contains
         CS%div_xx = 0.0_dp; CS%div_xx_dx = 0.0_dp; CS%div_xx_dy = 0.0_dp
         CS%grad_div_mag_h = 0.0_dp; CS%grad_div_mag_q = 0.0_dp
         CS%bhstr_xx = 0.0_dp; CS%bhstr_xy = 0.0_dp; CS%Del2vort_q = 0.0_dp
-
-        ! Map arrays to GPU
-        call map_hor_visc_to_gpu(CS)
 
         CS%initialized = .true.
 
@@ -386,86 +381,11 @@ contains
 
     end subroutine allocate_hor_visc_arrays
 
-    !> Map control structure arrays to GPU
-    subroutine map_hor_visc_to_gpu(CS)
-        type(hor_visc_CS), intent(inout) :: CS
-
-        ! Background and max viscosity
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
-        !$omp target enter data map(to: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
-#endif
-
-        ! Smagorinsky/Leith constants
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
-        !$omp target enter data map(to: CS%Biharm_const_xx, CS%Biharm_const_xy)
-        !$omp target enter data map(to: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
-        !$omp target enter data map(to: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
-#endif
-
-        ! Metrics
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
-        !$omp target enter data map(to: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
-        !$omp target enter data map(to: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
-        !$omp target enter data map(to: CS%reduction_xx, CS%reduction_xy)
-#endif
-
-        ! Work arrays
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target enter data map(alloc: CS%bhstr_xx, CS%bhstr_xy)
-        !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
-        !$omp target enter data map(alloc: CS%Kh, CS%Ah, CS%Shear_mag)
-        !$omp target enter data map(alloc: CS%Del2u, CS%Del2v)
-        !$omp target enter data map(alloc: CS%hrat_min, CS%visc_bound_rem)
-#endif
-
-        ! Leith arrays (allocated on GPU but computed on CPU, then transferred)
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
-        !$omp target enter data map(alloc: CS%grad_vort_mag_h, CS%grad_vort_mag_q, CS%vert_vort_mag)
-        !$omp target enter data map(alloc: CS%Del2vort_q)
-        !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
-        !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
-        !$omp target enter data map(to:CS)
-#endif
-
-    end subroutine map_hor_visc_to_gpu
-
     !> Finalize the horizontal viscosity solver
     subroutine hor_visc_end(CS)
         type(hor_visc_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
-
-        ! Unmap from GPU
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
-        !$omp target exit data map(delete: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
-        !$omp target exit data map(delete: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
-        !$omp target exit data map(delete: CS%Biharm_const_xx, CS%Biharm_const_xy)
-        !$omp target exit data map(delete: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
-        !$omp target exit data map(delete: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
-        !$omp target exit data map(delete: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
-        !$omp target exit data map(delete: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
-        !$omp target exit data map(delete: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
-        !$omp target exit data map(delete: CS%reduction_xx, CS%reduction_xy)
-        !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target exit data map(delete: CS%bhstr_xx, CS%bhstr_xy)
-        !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
-        !$omp target exit data map(delete: CS%Kh, CS%Ah, CS%Shear_mag)
-        !$omp target exit data map(delete: CS%Del2u, CS%Del2v)
-        !$omp target exit data map(delete: CS%hrat_min, CS%visc_bound_rem)
-        !$omp target exit data map(delete: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
-        !$omp target exit data map(delete: CS%grad_vort_mag_h, CS%grad_vort_mag_q, CS%vert_vort_mag)
-        !$omp target exit data map(delete: CS%Del2vort_q)
-        !$omp target exit data map(delete: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
-        !$omp target exit data map(delete: CS%grad_div_mag_h, CS%grad_div_mag_q)
-#endif
 
         ! Deallocate arrays
         if (allocated(CS%Kh_bg_xx)) deallocate (CS%Kh_bg_xx)
@@ -537,9 +457,7 @@ contains
 
     !> Compute horizontal viscous accelerations
    !!
-   !! This routine demonstrates the "branching mess" of real MOM6 with:
-   !! - ~30 runtime branches based on scheme selection
-   !! - Mixed GPU/CPU execution for Leith (explicit data transfers)
+   !! Computes horizontal viscous accelerations with:
    !! - Multiple viscosity schemes: Laplacian, biharmonic, Smagorinsky, Leith
    !! - Stability bounding with thickness-aware limits
    !!
@@ -566,108 +484,132 @@ contains
         h_neglect = CS%h_neglect
 
         ! Initialize output arrays to zero
-        do concurrent(k=1:nz, j=G%jsd:G%jed, i=G%isd:G%ied)
-            diffu(i, j, k) = 0.0_dp
-            diffv(i, j, k) = 0.0_dp
+        do k=1,nz
+            do j=G%jsd,G%jed
+                do i=G%isd,G%ied
+                    diffu(i, j, k) = 0.0_dp
+                    diffv(i, j, k) = 0.0_dp
+                end do
+            end do
         end do
 
         ! Main loop over layers
         do k = 1, nz
 
             !=====================================================================
-            ! STEP 1: Calculate velocity gradients (GPU)
+            ! STEP 1: Calculate velocity gradients
             !=====================================================================
             ! du/dx and dv/dy at h-points (for horizontal tension)
-            do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                CS%dudx(i, j) = CS%DY_dxT(i, j)*((G%IdyCu(i, j)*u(i, j, k)) - &
-                                                 (G%IdyCu(i - 1, j)*u(i - 1, j, k)))
-                CS%dvdy(i, j) = CS%DX_dyT(i, j)*((G%IdxCv(i, j)*v(i, j, k)) - &
-                                                 (G%IdxCv(i, j - 1)*v(i, j - 1, k)))
+            do j=Jsq,Jeq + 1
+                do i=Isq,Ieq + 1
+                    CS%dudx(i, j) = CS%DY_dxT(i, j)*((G%IdyCu(i, j)*u(i, j, k)) - &
+                                                     (G%IdyCu(i - 1, j)*u(i - 1, j, k)))
+                    CS%dvdy(i, j) = CS%DX_dyT(i, j)*((G%IdxCv(i, j)*v(i, j, k)) - &
+                                                     (G%IdxCv(i, j - 1)*v(i, j - 1, k)))
+                end do
             end do
 
             ! dv/dx and du/dy at q-points (for shearing strain)
-            do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                CS%dvdx(I, J) = CS%DY_dxBu(I, J)*((v(i + 1, J, k)*G%IdyCv(i + 1, J)) - &
-                                                  (v(i, J, k)*G%IdyCv(i, J)))
-                CS%dudy(I, J) = CS%DX_dyBu(I, J)*((u(I, j + 1, k)*G%IdxCu(I, j + 1)) - &
-                                                  (u(I, j, k)*G%IdxCu(I, j)))
+            do J=Jsq,Jeq
+                do I=Isq,Ieq
+                    CS%dvdx(I, J) = CS%DY_dxBu(I, J)*((v(i + 1, J, k)*G%IdyCv(i + 1, J)) - &
+                                                      (v(i, J, k)*G%IdyCv(i, J)))
+                    CS%dudy(I, J) = CS%DX_dyBu(I, J)*((u(I, j + 1, k)*G%IdxCu(I, j + 1)) - &
+                                                      (u(I, j, k)*G%IdxCu(I, j)))
+                end do
             end do
 
             !=====================================================================
-            ! STEP 2: Calculate strain tensor (GPU)
+            ! STEP 2: Calculate strain tensor
             !=====================================================================
             ! Horizontal tension (sh_xx) at h-points
-            do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                CS%sh_xx(i, j) = CS%dudx(i, j) - CS%dvdy(i, j)
+            do j=Jsq,Jeq + 1
+                do i=Isq,Ieq + 1
+                    CS%sh_xx(i, j) = CS%dudx(i, j) - CS%dvdy(i, j)
+                end do
             end do
 
             ! Shearing strain (sh_xy) at q-points with boundary condition branching
             if (CS%no_slip) then
                 ! No-slip: double the strain at boundaries (mask=0 means land)
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%sh_xy(I, J) = (2.0_dp - G%mask2dBu(I, J))*(CS%dvdx(I, J) + CS%dudy(I, J))
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%sh_xy(I, J) = (2.0_dp - G%mask2dBu(I, J))*(CS%dvdx(I, J) + CS%dudy(I, J))
+                    end do
                 end do
             else
                 ! Free-slip: zero strain at boundaries
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%sh_xy(I, J) = G%mask2dBu(I, J)*(CS%dvdx(I, J) + CS%dudy(I, J))
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%sh_xy(I, J) = G%mask2dBu(I, J)*(CS%dvdx(I, J) + CS%dudy(I, J))
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 3: Interpolate thickness to velocity points (GPU)
+            ! STEP 3: Interpolate thickness to velocity points
             !=====================================================================
             if (CS%use_land_mask) then
-                do concurrent(j=js - 1:je + 1, I=Isq:Ieq)
-                    CS%h_u(I, j) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i + 1, j)*h(i + 1, j, k))
+                do j=js - 1,je + 1
+                    do I=Isq,Ieq
+                        CS%h_u(I, j) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i + 1, j)*h(i + 1, j, k))
+                    end do
                 end do
-                do concurrent(J=Jsq:Jeq, i=is - 1:ie + 1)
-                    CS%h_v(i, J) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i, j + 1)*h(i, j + 1, k))
+                do J=Jsq,Jeq
+                    do i=is - 1,ie + 1
+                        CS%h_v(i, J) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i, j + 1)*h(i, j + 1, k))
+                    end do
                 end do
             else
-                do concurrent(j=js - 1:je + 1, I=Isq:Ieq)
-                    CS%h_u(I, j) = 0.5_dp*(h(i, j, k) + h(i + 1, j, k))
+                do j=js - 1,je + 1
+                    do I=Isq,Ieq
+                        CS%h_u(I, j) = 0.5_dp*(h(i, j, k) + h(i + 1, j, k))
+                    end do
                 end do
-                do concurrent(J=Jsq:Jeq, i=is - 1:ie + 1)
-                    CS%h_v(i, J) = 0.5_dp*(h(i, j, k) + h(i, j + 1, k))
+                do J=Jsq,Jeq
+                    do i=is - 1,ie + 1
+                        CS%h_v(i, J) = 0.5_dp*(h(i, j, k) + h(i, j + 1, k))
+                    end do
                 end do
             end if
 
             ! Thickness at q-points (average of 4 neighboring h-points)
-            do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                CS%hq(I, J) = 0.25_dp*((h(i, j, k) + h(i + 1, j + 1, k)) + &
-                                       (h(i + 1, j, k) + h(i, j + 1, k)))
+            do J=Jsq,Jeq
+                do I=Isq,Ieq
+                    CS%hq(I, J) = 0.25_dp*((h(i, j, k) + h(i + 1, j + 1, k)) + &
+                                           (h(i + 1, j, k) + h(i, j + 1, k)))
+                end do
             end do
 
             !=====================================================================
-            ! STEP 4: Compute biharmonic Del2u, Del2v if needed (GPU)
+            ! STEP 4: Compute biharmonic Del2u, Del2v if needed
             !=====================================================================
             if (CS%biharmonic) then
                 ! Del2u = x.Div(Grad u) at u-points
-                do concurrent(j=js:je, I=Isq:Ieq)
-                    CS%Del2u(I, j) = CS%Idx2dyCu(I, j)*((CS%dx2q(I, j)*CS%sh_xy(I, j)) - &
-                                                        (CS%dx2q(I, j - 1)*CS%sh_xy(I, j - 1))) + &
-                                     CS%Idxdy2u(I, j)*((CS%dy2h(i + 1, j)*CS%sh_xx(i + 1, j)) - &
-                                                       (CS%dy2h(i, j)*CS%sh_xx(i, j)))
+                do j=js,je
+                    do I=Isq,Ieq
+                        CS%Del2u(I, j) = CS%Idx2dyCu(I, j)*((CS%dx2q(I, j)*CS%sh_xy(I, j)) - &
+                                                            (CS%dx2q(I, j - 1)*CS%sh_xy(I, j - 1))) + &
+                                         CS%Idxdy2u(I, j)*((CS%dy2h(i + 1, j)*CS%sh_xx(i + 1, j)) - &
+                                                           (CS%dy2h(i, j)*CS%sh_xx(i, j)))
+                    end do
                 end do
 
                 ! Del2v = y.Div(Grad u) at v-points
-                do concurrent(J=Jsq:Jeq, i=is:ie)
-                    CS%Del2v(i, J) = CS%Idxdy2v(i, J)*((CS%dy2q(i, J)*CS%sh_xy(i, J)) - &
-                                                       (CS%dy2q(i - 1, J)*CS%sh_xy(i - 1, J))) - &
-                                     CS%Idx2dyCv(i, J)*((CS%dx2h(i, j + 1)*CS%sh_xx(i, j + 1)) - &
-                                                        (CS%dx2h(i, j)*CS%sh_xx(i, j)))
+                do J=Jsq,Jeq
+                    do i=is,ie
+                        CS%Del2v(i, J) = CS%Idxdy2v(i, J)*((CS%dy2q(i, J)*CS%sh_xy(i, J)) - &
+                                                           (CS%dy2q(i - 1, J)*CS%sh_xy(i - 1, J))) - &
+                                         CS%Idx2dyCv(i, J)*((CS%dx2h(i, j + 1)*CS%sh_xx(i, j + 1)) - &
+                                                            (CS%dx2h(i, j)*CS%sh_xx(i, j)))
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 5: Leith vorticity calculation (CPU-ONLY!)
+            ! STEP 5: Leith vorticity calculation
             !=====================================================================
             if (CS%Leith_Kh) then
-                ! Transfer velocity gradients from GPU to CPU
-#ifdef __NVCOMPILER_LLVM__
-                !$omp target update from(CS%dvdx, CS%dudy, CS%dudx, CS%dvdy)
-#endif
 
                 ! Calculate vorticity at q-points (CPU)
                 if (CS%no_slip) then
@@ -766,123 +708,144 @@ contains
                     end do
                 end do
 
-                ! Transfer Leith data back to GPU
-#ifdef __NVCOMPILER_LLVM__
-                !$omp target update to(CS%vert_vort_mag, CS%grad_vort_mag_q)
-#endif
                 if (CS%Leith_Ah) then
-#ifdef __NVCOMPILER_LLVM__
-                    !$omp target update to(CS%Del2vort_q)
-#endif
                 end if
             end if
 
             !=====================================================================
-            ! STEP 6: Compute Smagorinsky shear magnitude (GPU)
+            ! STEP 6: Compute Smagorinsky shear magnitude
             !=====================================================================
             if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
-                do concurrent(j=js:je, i=is:ie)
-                    sh_xx_sq = CS%sh_xx(i, j)**2
-                    sh_xy_sq = 0.25_dp*(((CS%sh_xy(i - 1, j - 1)**2) + (CS%sh_xy(i, j)**2)) + &
-                                        ((CS%sh_xy(i - 1, j)**2) + (CS%sh_xy(i, j - 1)**2)))
-                    CS%Shear_mag(i, j) = sqrt(sh_xx_sq + sh_xy_sq)
+                do j=js,je
+                    do i=is,ie
+                        sh_xx_sq = CS%sh_xx(i, j)**2
+                        sh_xy_sq = 0.25_dp*(((CS%sh_xy(i - 1, j - 1)**2) + (CS%sh_xy(i, j)**2)) + &
+                                            ((CS%sh_xy(i - 1, j)**2) + (CS%sh_xy(i, j - 1)**2)))
+                        CS%Shear_mag(i, j) = sqrt(sh_xx_sq + sh_xy_sq)
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 7: Compute thickness ratio for better_bound (GPU)
+            ! STEP 7: Compute thickness ratio for better_bound
             !=====================================================================
             if (CS%better_bound_Kh .or. CS%better_bound_Ah) then
-                do concurrent(j=js:je, i=is:ie)
-                    h_min = min(CS%h_u(i, j), CS%h_u(i - 1, j), CS%h_v(i, j), CS%h_v(i, j - 1))
-                    CS%hrat_min(i, j) = min(1.0_dp, h_min/(h(i, j, k) + h_neglect))
+                do j=js,je
+                    do i=is,ie
+                        h_min = min(CS%h_u(i, j), CS%h_u(i - 1, j), CS%h_v(i, j), CS%h_v(i, j - 1))
+                        CS%hrat_min(i, j) = min(1.0_dp, h_min/(h(i, j, k) + h_neglect))
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 8: Determine Laplacian viscosity Kh at h-points (GPU)
+            ! STEP 8: Determine Laplacian viscosity Kh at h-points
             !=====================================================================
             if (CS%Laplacian) then
                 ! Start with background viscosity
-                do concurrent(j=js:je, i=is:ie)
-                    CS%Kh(i, j) = CS%Kh_bg_xx(i, j)
+                do j=js,je
+                    do i=is,ie
+                        CS%Kh(i, j) = CS%Kh_bg_xx(i, j)
+                    end do
                 end do
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Kh) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Kh(i, j) = max(CS%Kh(i, j), CS%Laplac2_const_xx(i, j)*CS%Shear_mag(i, j))
+                    do j=js,je
+                        do i=is,ie
+                            CS%Kh(i, j) = max(CS%Kh(i, j), CS%Laplac2_const_xx(i, j)*CS%Shear_mag(i, j))
+                        end do
                     end do
                 end if
 
                 ! Add Leith contribution
                 if (CS%Leith_Kh) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Kh(i, j) = max(CS%Kh(i, j), &
-                                          CS%Laplac3_const_xx(i, j)*CS%vert_vort_mag(i, j)*inv_PI3)
+                    do j=js,je
+                        do i=is,ie
+                            CS%Kh(i, j) = max(CS%Kh(i, j), &
+                                              CS%Laplac3_const_xx(i, j)*CS%vert_vort_mag(i, j)*inv_PI3)
+                        end do
                     end do
                 end if
 
                 ! Apply minimum floor
-                do concurrent(j=js:je, i=is:ie)
-                    CS%Kh(i, j) = max(CS%Kh(i, j), CS%Kh_bg_min)
+                do j=js,je
+                    do i=is,ie
+                        CS%Kh(i, j) = max(CS%Kh(i, j), CS%Kh_bg_min)
+                    end do
                 end do
 
                 ! Apply stability bounds
                 if (CS%better_bound_Kh .and. CS%better_bound_Ah) then
                     ! Track remaining budget for combined Kh + Ah bounding
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%visc_bound_rem(i, j) = 1.0_dp
-                        Kh_max_here = CS%hrat_min(i, j)*CS%Kh_Max_xx(i, j)
-                        if (CS%Kh(i, j) >= Kh_max_here) then
-                            CS%visc_bound_rem(i, j) = 0.0_dp
-                            CS%Kh(i, j) = Kh_max_here
-                        else if (CS%Kh(i, j) > 0.0_dp) then
-                            CS%visc_bound_rem(i, j) = 1.0_dp - CS%Kh(i, j)/Kh_max_here
-                        end if
+                    do j=js,je
+                        do i=is,ie
+                            CS%visc_bound_rem(i, j) = 1.0_dp
+                            Kh_max_here = CS%hrat_min(i, j)*CS%Kh_Max_xx(i, j)
+                            if (CS%Kh(i, j) >= Kh_max_here) then
+                                CS%visc_bound_rem(i, j) = 0.0_dp
+                                CS%Kh(i, j) = Kh_max_here
+                            else if (CS%Kh(i, j) > 0.0_dp) then
+                                CS%visc_bound_rem(i, j) = 1.0_dp - CS%Kh(i, j)/Kh_max_here
+                            end if
+                        end do
                     end do
                 else if (CS%better_bound_Kh) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Kh(i, j) = min(CS%Kh(i, j), CS%hrat_min(i, j)*CS%Kh_Max_xx(i, j))
+                    do j=js,je
+                        do i=is,ie
+                            CS%Kh(i, j) = min(CS%Kh(i, j), CS%hrat_min(i, j)*CS%Kh_Max_xx(i, j))
+                        end do
                     end do
                 else if (CS%bound_Kh) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Kh(i, j) = min(CS%Kh(i, j), CS%Kh_Max_xx(i, j))
+                    do j=js,je
+                        do i=is,ie
+                            CS%Kh(i, j) = min(CS%Kh(i, j), CS%Kh_Max_xx(i, j))
+                        end do
                     end do
                 end if
 
                 ! Compute str_xx (Laplacian contribution)
-                do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                    CS%str_xx(i, j) = -CS%Kh(i, j)*CS%sh_xx(i, j)
+                do j=Jsq,Jeq + 1
+                    do i=Isq,Ieq + 1
+                        CS%str_xx(i, j) = -CS%Kh(i, j)*CS%sh_xx(i, j)
+                    end do
                 end do
             else
-                do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                    CS%str_xx(i, j) = 0.0_dp
+                do j=Jsq,Jeq + 1
+                    do i=Isq,Ieq + 1
+                        CS%str_xx(i, j) = 0.0_dp
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 9: Determine biharmonic viscosity Ah at h-points (GPU)
+            ! STEP 9: Determine biharmonic viscosity Ah at h-points
             !=====================================================================
             if (CS%biharmonic) then
                 ! Start with background viscosity
-                do concurrent(j=js:je, i=is:ie)
-                    CS%Ah(i, j) = CS%Ah_bg_xx(i, j)
+                do j=js,je
+                    do i=is,ie
+                        CS%Ah(i, j) = CS%Ah_bg_xx(i, j)
+                    end do
                 end do
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Ah) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm_const_xx(i, j)*CS%Shear_mag(i, j))
+                    do j=js,je
+                        do i=is,ie
+                            CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm_const_xx(i, j)*CS%Shear_mag(i, j))
+                        end do
                     end do
                 end if
 
                 ! Add Leith biharmonic contribution
                 if (CS%Leith_Ah) then
-                    do concurrent(j=js:je, i=is:ie)
-                        Del2vort_h = 0.25_dp*((CS%Del2vort_q(i, j) + CS%Del2vort_q(i - 1, j - 1)) + &
-                                              (CS%Del2vort_q(i - 1, j) + CS%Del2vort_q(i, j - 1)))
-                        CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm6_const_xx(i, j)*abs(Del2vort_h)*inv_PI6)
+                    do j=js,je
+                        do i=is,ie
+                            Del2vort_h = 0.25_dp*((CS%Del2vort_q(i, j) + CS%Del2vort_q(i - 1, j - 1)) + &
+                                                  (CS%Del2vort_q(i - 1, j) + CS%Del2vort_q(i, j - 1)))
+                            CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm6_const_xx(i, j)*abs(Del2vort_h)*inv_PI6)
+                        end do
                     end do
                 end if
 
@@ -890,189 +853,234 @@ contains
                 if (CS%better_bound_Ah) then
                     if (CS%better_bound_Kh) then
                         ! Use remaining viscosity budget
-                        do concurrent(j=js:je, i=is:ie)
-                            CS%Ah(i, j) = min(CS%Ah(i, j), CS%visc_bound_rem(i, j)*CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
+                        do j=js,je
+                            do i=is,ie
+                                CS%Ah(i, j) = min(CS%Ah(i, j), CS%visc_bound_rem(i, j)*CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
+                            end do
                         end do
                     else
-                        do concurrent(j=js:je, i=is:ie)
-                            CS%Ah(i, j) = min(CS%Ah(i, j), CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
+                        do j=js,je
+                            do i=is,ie
+                                CS%Ah(i, j) = min(CS%Ah(i, j), CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
+                            end do
                         end do
                     end if
                 else if (CS%bound_Ah) then
-                    do concurrent(j=js:je, i=is:ie)
-                        CS%Ah(i, j) = min(CS%Ah(i, j), CS%Ah_Max_xx(i, j))
+                    do j=js,je
+                        do i=is,ie
+                            CS%Ah(i, j) = min(CS%Ah(i, j), CS%Ah_Max_xx(i, j))
+                        end do
                     end do
                 end if
 
                 ! Add biharmonic contribution to str_xx and store bhstr_xx
-                do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                    d_del2u = (G%IdyCu(i, j)*CS%Del2u(i, j)) - (G%IdyCu(i - 1, j)*CS%Del2u(i - 1, j))
-                    d_del2v = (G%IdxCv(i, j)*CS%Del2v(i, j)) - (G%IdxCv(i, j - 1)*CS%Del2v(i, j - 1))
-                    d_str = CS%Ah(i, j)*((CS%DY_dxT(i, j)*d_del2u) - (CS%DX_dyT(i, j)*d_del2v))
-                    CS%bhstr_xx(i, j) = d_str*(h(i, j, k)*CS%reduction_xx(i, j))
-                    CS%str_xx(i, j) = CS%str_xx(i, j) + d_str
+                do j=Jsq,Jeq + 1
+                    do i=Isq,Ieq + 1
+                        d_del2u = (G%IdyCu(i, j)*CS%Del2u(i, j)) - (G%IdyCu(i - 1, j)*CS%Del2u(i - 1, j))
+                        d_del2v = (G%IdxCv(i, j)*CS%Del2v(i, j)) - (G%IdxCv(i, j - 1)*CS%Del2v(i, j - 1))
+                        d_str = CS%Ah(i, j)*((CS%DY_dxT(i, j)*d_del2u) - (CS%DX_dyT(i, j)*d_del2v))
+                        CS%bhstr_xx(i, j) = d_str*(h(i, j, k)*CS%reduction_xx(i, j))
+                        CS%str_xx(i, j) = CS%str_xx(i, j) + d_str
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 10: Multiply str_xx by thickness (GPU)
+            ! STEP 10: Multiply str_xx by thickness
             !=====================================================================
-            do concurrent(j=Jsq:Jeq + 1, i=Isq:Ieq + 1)
-                CS%str_xx(i, j) = CS%str_xx(i, j)*(h(i, j, k)*CS%reduction_xx(i, j))
+            do j=Jsq,Jeq + 1
+                do i=Isq,Ieq + 1
+                    CS%str_xx(i, j) = CS%str_xx(i, j)*(h(i, j, k)*CS%reduction_xx(i, j))
+                end do
             end do
 
             !=====================================================================
-            ! STEP 11: Determine Laplacian viscosity Kh at q-points (GPU)
+            ! STEP 11: Determine Laplacian viscosity Kh at q-points
             !=====================================================================
             if (CS%Laplacian) then
                 ! Start with background viscosity
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%Kh(I, J) = CS%Kh_bg_xy(I, J)
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%Kh(I, J) = CS%Kh_bg_xy(I, J)
+                    end do
                 end do
 
                 ! Add Smagorinsky contribution (interpolate shear_mag to q-points)
                 if (CS%Smagorinsky_Kh) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
-                                            (CS%sh_xx(i + 1, j)**2 + CS%sh_xx(i, j + 1)**2))
-                        sh_xy_sq = CS%sh_xy(I, J)**2
-                        CS%Kh(I, J) = max(CS%Kh(I, J), CS%Laplac2_const_xy(I, J)*sqrt(sh_xx_sq + sh_xy_sq))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
+                                                (CS%sh_xx(i + 1, j)**2 + CS%sh_xx(i, j + 1)**2))
+                            sh_xy_sq = CS%sh_xy(I, J)**2
+                            CS%Kh(I, J) = max(CS%Kh(I, J), CS%Laplac2_const_xy(I, J)*sqrt(sh_xx_sq + sh_xy_sq))
+                        end do
                     end do
                 end if
 
                 ! Add Leith contribution
                 if (CS%Leith_Kh) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%Kh(I, J) = max(CS%Kh(I, J), &
-                                          CS%Laplac3_const_xy(I, J)*CS%grad_vort_mag_q(I, J)*inv_PI3)
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%Kh(I, J) = max(CS%Kh(I, J), &
+                                              CS%Laplac3_const_xy(I, J)*CS%grad_vort_mag_q(I, J)*inv_PI3)
+                        end do
                     end do
                 end if
 
                 ! Apply minimum floor
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%Kh(I, J) = max(CS%Kh(I, J), CS%Kh_bg_min)
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%Kh(I, J) = max(CS%Kh(I, J), CS%Kh_bg_min)
+                    end do
                 end do
 
                 ! Apply stability bounds at q-points
                 if (CS%better_bound_Kh) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
-                                         (CS%hrat_min(i + 1, j) + CS%hrat_min(i, j + 1)))
-                        CS%Kh(I, J) = min(CS%Kh(I, J), h_min*CS%Kh_Max_xy(I, J))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
+                                             (CS%hrat_min(i + 1, j) + CS%hrat_min(i, j + 1)))
+                            CS%Kh(I, J) = min(CS%Kh(I, J), h_min*CS%Kh_Max_xy(I, J))
+                        end do
                     end do
                 else if (CS%bound_Kh) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%Kh(I, J) = min(CS%Kh(I, J), CS%Kh_Max_xy(I, J))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%Kh(I, J) = min(CS%Kh(I, J), CS%Kh_Max_xy(I, J))
+                        end do
                     end do
                 end if
 
                 ! Compute str_xy (Laplacian contribution)
                 if (CS%no_slip) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
+                        end do
                     end do
                 else
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
+                        end do
                     end do
                 end if
             else
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%str_xy(I, J) = 0.0_dp
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%str_xy(I, J) = 0.0_dp
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 12: Determine biharmonic viscosity Ah at q-points (GPU)
+            ! STEP 12: Determine biharmonic viscosity Ah at q-points
             !=====================================================================
             if (CS%biharmonic) then
                 ! Start with background viscosity
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%Ah(I, J) = CS%Ah_bg_xy(I, J)
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%Ah(I, J) = CS%Ah_bg_xy(I, J)
+                    end do
                 end do
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Ah) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
-                                            (CS%sh_xx(i + 1, j)**2 + CS%sh_xx(i, j + 1)**2))
-                        sh_xy_sq = CS%sh_xy(I, J)**2
-                        CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm_const_xy(I, J)*sqrt(sh_xx_sq + sh_xy_sq))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
+                                                (CS%sh_xx(i + 1, j)**2 + CS%sh_xx(i, j + 1)**2))
+                            sh_xy_sq = CS%sh_xy(I, J)**2
+                            CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm_const_xy(I, J)*sqrt(sh_xx_sq + sh_xy_sq))
+                        end do
                     end do
                 end if
 
                 ! Add Leith biharmonic contribution
                 if (CS%Leith_Ah) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm6_const_xy(I, J)*abs(CS%Del2vort_q(I, J))*inv_PI6)
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm6_const_xy(I, J)*abs(CS%Del2vort_q(I, J))*inv_PI6)
+                        end do
                     end do
                 end if
 
                 ! Apply stability bounds
                 if (CS%better_bound_Ah) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
-                                         (CS%hrat_min(i + 1, j) + CS%hrat_min(i, j + 1)))
-                        CS%Ah(I, J) = min(CS%Ah(I, J), h_min*CS%Ah_Max_xy(I, J))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
+                                             (CS%hrat_min(i + 1, j) + CS%hrat_min(i, j + 1)))
+                            CS%Ah(I, J) = min(CS%Ah(I, J), h_min*CS%Ah_Max_xy(I, J))
+                        end do
                     end do
                 else if (CS%bound_Ah) then
-                    do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                        CS%Ah(I, J) = min(CS%Ah(I, J), CS%Ah_Max_xy(I, J))
+                    do J=Jsq,Jeq
+                        do I=Isq,Ieq
+                            CS%Ah(I, J) = min(CS%Ah(I, J), CS%Ah_Max_xy(I, J))
+                        end do
                     end do
                 end if
 
                 ! Add biharmonic contribution to str_xy and store bhstr_xy
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    d_str = CS%Ah(I, J)*((CS%DY_dxBu(I, J)*((CS%Del2v(i + 1, J)*G%IdyCv(i + 1, J)) - &
-                                                            (CS%Del2v(i, J)*G%IdyCv(i, J)))) + &
-                                         (CS%DX_dyBu(I, J)*((CS%Del2u(I, j + 1)*G%IdxCu(I, j + 1)) - &
-                                                            (CS%Del2u(I, j)*G%IdxCu(I, j)))))
-                    CS%bhstr_xy(I, J) = d_str*(CS%hq(I, J)*CS%reduction_xy(I, J))
-                    CS%str_xy(I, J) = CS%str_xy(I, J) + d_str
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        d_str = CS%Ah(I, J)*((CS%DY_dxBu(I, J)*((CS%Del2v(i + 1, J)*G%IdyCv(i + 1, J)) - &
+                                                                (CS%Del2v(i, J)*G%IdyCv(i, J)))) + &
+                                             (CS%DX_dyBu(I, J)*((CS%Del2u(I, j + 1)*G%IdxCu(I, j + 1)) - &
+                                                                (CS%Del2u(I, j)*G%IdxCu(I, j)))))
+                        CS%bhstr_xy(I, J) = d_str*(CS%hq(I, J)*CS%reduction_xy(I, J))
+                        CS%str_xy(I, J) = CS%str_xy(I, J) + d_str
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 13: Multiply str_xy by thickness (GPU)
+            ! STEP 13: Multiply str_xy by thickness
             !=====================================================================
             if (CS%no_slip) then
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*CS%reduction_xy(I, J))
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*CS%reduction_xy(I, J))
+                    end do
                 end do
             else
-                do concurrent(J=Jsq:Jeq, I=Isq:Ieq)
-                    CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*G%mask2dBu(I, J)*CS%reduction_xy(I, J))
+                do J=Jsq,Jeq
+                    do I=Isq,Ieq
+                        CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*G%mask2dBu(I, J)*CS%reduction_xy(I, J))
+                    end do
                 end do
             end if
 
             !=====================================================================
-            ! STEP 14: Compute viscous accelerations (GPU)
+            ! STEP 14: Compute viscous accelerations
             !=====================================================================
             ! diffu = 1/h * x.Div(h * stress tensor)
-            do concurrent(j=js:je, I=Isq:Ieq)
-                diffu(I, j, k) = ((G%IdxCu(I, j)*((CS%dx2q(I, j - 1)*CS%str_xy(I, j - 1)) - &
-                                                  (CS%dx2q(I, j)*CS%str_xy(I, j))) + &
-                                   G%IdyCu(I, j)*((CS%dy2h(i, j)*CS%str_xx(i, j)) - &
-                                                  (CS%dy2h(i + 1, j)*CS%str_xx(i + 1, j))))* &
-                                  G%IareaCu(I, j))/(CS%h_u(I, j) + h_neglect)
+            do j=js,je
+                do I=Isq,Ieq
+                    diffu(I, j, k) = ((G%IdxCu(I, j)*((CS%dx2q(I, j - 1)*CS%str_xy(I, j - 1)) - &
+                                                      (CS%dx2q(I, j)*CS%str_xy(I, j))) + &
+                                       G%IdyCu(I, j)*((CS%dy2h(i, j)*CS%str_xx(i, j)) - &
+                                                      (CS%dy2h(i + 1, j)*CS%str_xx(i + 1, j))))* &
+                                      G%IareaCu(I, j))/(CS%h_u(I, j) + h_neglect)
+                end do
             end do
 
             ! diffv = 1/h * y.Div(h * stress tensor)
-            do concurrent(J=Jsq:Jeq, i=is:ie)
-                diffv(i, J, k) = ((G%IdyCv(i, J)*((CS%dy2q(i - 1, J)*CS%str_xy(i - 1, J)) - &
-                                                  (CS%dy2q(i, J)*CS%str_xy(i, J))) - &
-                                   G%IdxCv(i, J)*((CS%dx2h(i, j)*CS%str_xx(i, j)) - &
-                                                  (CS%dx2h(i, j + 1)*CS%str_xx(i, j + 1))))* &
-                                  G%IareaCv(i, J))/(CS%h_v(i, J) + h_neglect)
+            do J=Jsq,Jeq
+                do i=is,ie
+                    diffv(i, J, k) = ((G%IdyCv(i, J)*((CS%dy2q(i - 1, J)*CS%str_xy(i - 1, J)) - &
+                                                      (CS%dy2q(i, J)*CS%str_xy(i, J))) - &
+                                       G%IdxCv(i, J)*((CS%dx2h(i, j)*CS%str_xx(i, j)) - &
+                                                      (CS%dx2h(i, j + 1)*CS%str_xx(i, j + 1))))* &
+                                      G%IareaCv(i, J))/(CS%h_v(i, J) + h_neglect)
+                end do
             end do
 
             !=====================================================================
             ! STEP 15: Compute friction work (after diffu/diffv)
             !=====================================================================
             if (CS%compute_FrictWork .and. present(FrictWork)) then
-#ifdef __NVCOMPILER_LLVM__
-                !$omp target update from(CS%str_xx, CS%str_xy)
-#endif
                 do j = js, je
                     do i = is, ie
                         FrictWork(i, j, k) = ( &

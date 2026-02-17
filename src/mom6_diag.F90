@@ -8,7 +8,7 @@
 !! - ID > 0 means diagnostic is active; ID <= 0 means skip
 !! - post_data generic interface handles 2D/3D fields
 !! - post_product_sum_u/v compute vertical sums of 3D products (momentum budget)
-!! - GPU-compatible using OpenMP target directives
+!!
 !!
 !! Output Modes:
 !! - DIAG_NONE:  Disabled (no computation)
@@ -102,11 +102,6 @@ contains
         CS%work_2d = 0.0_dp
         CS%work_sum = 0.0_dp
 
-        ! Map to GPU
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: CS%work_2d, CS%work_sum)
-#endif
-
         ! Initialize timing
         CS%total_time = 0.0_dp
         CS%total_calls = 0
@@ -122,10 +117,6 @@ contains
         type(diag_ctrl), intent(inout) :: CS
 
         if (.not. CS%initialized) return
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%work_2d, CS%work_sum)
-#endif
 
         if (allocated(CS%work_2d)) deallocate (CS%work_2d)
         if (allocated(CS%work_sum)) deallocate (CS%work_sum)
@@ -194,8 +185,7 @@ contains
         frms = 0.0_dp
         cnt = 0
 
-        ! Use explicit loops with reduction for GPU compatibility
-        !$omp parallel do collapse(2) reduction(min:fmin) reduction(max:fmax) reduction(+:fmean,frms,cnt) private(i,j)
+        ! Use explicit loops with reduction
         do j = G%jsc, G%jec
             do i = G%isc, G%iec
                 fmin = min(fmin, field(i, j))
@@ -205,7 +195,6 @@ contains
                 cnt = cnt + 1
             end do
         end do
-        !$omp end parallel do
 
         if (cnt > 0) then
             fmean = fmean/real(cnt, dp)
@@ -252,8 +241,7 @@ contains
         frms = 0.0_dp
         cnt = 0
 
-        ! Use explicit loops with reduction for GPU compatibility
-        !$omp parallel do collapse(3) reduction(min:fmin) reduction(max:fmax) reduction(+:fmean,frms,cnt) private(i,j,k)
+        ! Use explicit loops with reduction
         do k = 1, nz
             do j = G%jsc, G%jec
                 do i = G%isc, G%iec
@@ -265,7 +253,6 @@ contains
                 end do
             end do
         end do
-        !$omp end parallel do
 
         if (cnt > 0) then
             fmean = fmean/real(cnt, dp)
@@ -305,23 +292,19 @@ contains
 
         ! Compute vertical sum of product
         ! Initialize work array to zero
-        !$omp parallel do collapse(2) private(i,j)
         do j = G%jsc, G%jec
             do i = G%isc, G%iec - 1
                 CS%work_2d(i, j) = 0.0_dp
             end do
         end do
-        !$omp end parallel do
 
         ! Accumulate product over layers
         do k = 1, nz
-            !$omp parallel do collapse(2) private(i,j)
             do j = G%jsc, G%jec
                 do i = G%isc, G%iec - 1
                     CS%work_2d(i, j) = CS%work_2d(i, j) + u_a(i, j, k)*u_b(i, j, k)
                 end do
             end do
-            !$omp end parallel do
         end do
 
         call post_data_2d(id, CS%work_2d, G, CS)
@@ -344,23 +327,19 @@ contains
 
         ! Compute vertical sum of product
         ! Initialize work array to zero
-        !$omp parallel do collapse(2) private(i,j)
         do j = G%jsc, G%jec - 1
             do i = G%isc, G%iec
                 CS%work_2d(i, j) = 0.0_dp
             end do
         end do
-        !$omp end parallel do
 
         ! Accumulate product over layers
         do k = 1, nz
-            !$omp parallel do collapse(2) private(i,j)
             do j = G%jsc, G%jec - 1
                 do i = G%isc, G%iec
                     CS%work_2d(i, j) = CS%work_2d(i, j) + v_a(i, j, k)*v_b(i, j, k)
                 end do
             end do
-            !$omp end parallel do
         end do
 
         call post_data_2d(id, CS%work_2d, G, CS)

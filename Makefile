@@ -1,37 +1,20 @@
 # MOM6 Mini-Apps Makefile
 #
-# Build mini-apps for GPU hackathon benchmarking
+# Build mini-apps for benchmarking
 #
 # Usage:
-#   make              - Build all with nvfortran (GPU)
-#   make FC=gfortran  - Build with gfortran (CPU)
-#   make FC=ifx       - Build with Intel ifx (CPU)
+#   make              - Build all with gfortran
+#   make FC=gfortran  - Build with gfortran
+#   make FC=ifx       - Build with Intel ifx
 #   make clean        - Remove binaries
 #
-# For GPU builds (nvfortran):
-#   make GPU=yes      - Enable OpenMP target offloading (default)
-#   make GPU=no       - Disable GPU, CPU-only OpenMP
-#
-# Profiling (nvfortran only):
-#   make NVTX=yes         - Enable NVTX ranges for Nsight profiling
-#   make DISABLE_PROFILER=yes - Disable profiler entirely (zero overhead)
-#
 # Examples:
-#   make FC=nvfortran GPU=yes   # NVIDIA GPU build
-#   make FC=gfortran GPU=no     # GNU CPU build
-#   make FC=nvfortran GPU=yes NVTX=yes  # GPU build with Nsight profiling
+#   make FC=gfortran        # GNU build
+#   make FC=ifx             # Intel build
+#   make FC=nvfortran       # NVIDIA build
 
 # Default compiler
-FC ?= nvfortran
-
-# GPU flag (default: yes for nvfortran)
-GPU ?= yes
-
-# NVTX profiling (default: no, set NVTX=yes to enable for NVIDIA)
-NVTX ?= no
-
-# Disable profiler entirely (default: no)
-DISABLE_PROFILER ?= no
+FC ?= gfortran
 
 # Directories
 SRCDIR = src
@@ -40,59 +23,33 @@ BUILDDIR = build
 
 # Compiler-specific flags (use findstring to match full paths)
 ifneq (,$(findstring nvfortran,$(FC)))
-  ifeq ($(GPU),yes)
-    # NVIDIA GPU offloading with OpenMP target + stdpar
-    FFLAGS = -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -Minfo=accel -gpu=mem:separate
-    LDFLAGS = -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -cudalib=nvtx
-  else
-    # CPU-only with OpenMP
-    FFLAGS = -O3 -mp -Minfo=opt
-    LDFLAGS = -mp
-  endif
+  FFLAGS = -O3
+  LDFLAGS =
   MODFLAG = -module
 else ifneq (,$(findstring gfortran,$(FC)))
-  # GNU Fortran (CPU only)
-  FFLAGS = -O3 -fopenmp -fallow-argument-mismatch
-  LDFLAGS = -fopenmp
+  # GNU Fortran
+  FFLAGS = -O3 -fallow-argument-mismatch
+  LDFLAGS =
   MODFLAG = -J
 else ifneq (,$(findstring ifx,$(FC)))
-  # Intel ifx (CPU with OpenMP)
-  FFLAGS = -O3 -qopenmp -heap-arrays
-  LDFLAGS = -qopenmp
+  # Intel ifx
+  FFLAGS = -O3 -heap-arrays
+  LDFLAGS =
   MODFLAG = -module
 else ifneq (,$(findstring flang-new,$(FC)))
-  # LLVM Flang (experimental GPU support)
-  ifeq ($(GPU),yes)
-    FFLAGS = -O3 -fopenmp -fopenmp-targets=nvptx64
-    LDFLAGS = -fopenmp -fopenmp-targets=nvptx64
-  else
-    FFLAGS = -O3 -fopenmp
-    LDFLAGS = -fopenmp
-  endif
+  # LLVM Flang
+  FFLAGS = -O3
+  LDFLAGS =
   MODFLAG = -J
 else ifneq (,$(findstring lfortran,$(FC)))
-  FFLAGS = -O3 --cpp --openmp
-  LDFLAGS = 
+  FFLAGS = -O3 --cpp
+  LDFLAGS =
   MODFLAG = -J
 else
   # Default flags
   FFLAGS = -O3
   LDFLAGS =
   MODFLAG = -J
-endif
-
-# Profiler preprocessor flags
-ifeq ($(NVTX),yes)
-  FFLAGS += -DUSE_NVTX
-  # NVTX requires cudalib=nvtx for nvfortran
-  ifneq (,$(findstring nvfortran,$(FC)))
-    FFLAGS += -cudalib=nvtx
-    LDFLAGS += -cudalib=nvtx
-  endif
-endif
-
-ifeq ($(DISABLE_PROFILER),yes)
-  FFLAGS += -DDISABLE_PROFILER
 endif
 
 # Module include path
@@ -178,9 +135,6 @@ info:
 	@echo "MOM6 Mini-Apps Build Configuration"
 	@echo "========================================"
 	@echo "Compiler: $(FC)"
-	@echo "GPU:      $(GPU)"
-	@echo "NVTX:     $(NVTX)"
-	@echo "DISABLE_PROFILER: $(DISABLE_PROFILER)"
 	@echo "FFLAGS:   $(FFLAGS)"
 	@echo "LDFLAGS:  $(LDFLAGS)"
 	@echo "========================================"

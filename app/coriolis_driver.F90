@@ -1,6 +1,5 @@
 !> Standalone driver for the Coriolis/momentum advection miniapp
 program coriolis_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid
@@ -18,6 +17,7 @@ program coriolis_driver
 
     real(dp) :: t_start, t_end, t_total
     integer :: ni, nj, nk, niter, iter, i, j, k, scheme
+    integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
 
     ! Default parameters
@@ -78,12 +78,10 @@ program coriolis_driver
     allocate (CAu(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (CAv(G%isd:G%ied, G%jsd:G%jed, nk))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: u, v, h, uh, vh, CAu, CAv)
-#endif
-
     ! Initialize state with realistic patterns
-    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
         h(i, j, k) = 4000.0_dp/real(nk, dp)
         u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)* &
                      exp(-real(k, dp)/30.0_dp)
@@ -91,11 +89,9 @@ program coriolis_driver
                      exp(-real(k, dp)/30.0_dp)
         uh(i, j, k) = u(i, j, k)*h(i, j, k)*G%dyCu(i, j)
         vh(i, j, k) = v(i, j, k)*h(i, j, k)*G%dxCv(i, j)
+        end do
+      end do
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(u, v, h, uh, vh)
-#endif
 
     print '(A)', ''
     print '(A)', 'Running Coriolis solver...'
@@ -103,17 +99,12 @@ program coriolis_driver
     t_total = 0.0_dp
 
     do iter = 1, niter
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call CorAdCalc(u, v, h, uh, vh, CAu, CAv, G, GV, CS)
-        t_end = omp_get_wtime()
+        call system_clock(clock_end)
 
-        t_total = t_total + (t_end - t_start)
+        t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: CAu, CAv)
-    !$omp target exit data map(delete: u, v, h, uh, vh)
-#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

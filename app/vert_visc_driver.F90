@@ -1,6 +1,5 @@
 !> Standalone driver for the vertical viscosity miniapp
 program vert_visc_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, RHO_0, &
@@ -24,6 +23,7 @@ program vert_visc_driver
     real(dp) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
     real(dp), parameter :: PI = 3.14159265358979_dp
     integer :: ni, nj, nk, niter, iter, i, j, k
+    integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
 
     ! Default parameters
@@ -73,9 +73,6 @@ program vert_visc_driver
             forces%tauy(i, j) = 0.0_dp
         end do
     end do
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(forces%taux, forces%tauy)
-#endif
 
     ! Initialize visc (Rayleigh drag in bottom layer)
     call init_vertvisc_visc(visc, G, GV, use_rayleigh=.true.)
@@ -93,9 +90,6 @@ program vert_visc_driver
             visc%Ray_v(i, j, nk) = 1.0e-4_dp
         end do
     end do
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(visc%Ray_u, visc%Ray_v)
-#endif
 
     dt = 300.0_dp  ! 5 minute timestep
 
@@ -106,13 +100,11 @@ program vert_visc_driver
     allocate (u_init(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (v_init(G%isd:G%ied, G%jsd:G%jed, nk))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: u, v, h, u_init, v_init)
-#endif
-
     ! Initialize state with vertical shear profile
     ! Surface-intensified flow that should be smoothed by viscosity
-    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
         ! Layer thickness (uniform)
         h(i, j, k) = 4000.0_dp / real(nk, dp)
 
@@ -124,11 +116,9 @@ program vert_visc_driver
 
         u(i, j, k) = u_init(i, j, k)
         v(i, j, k) = v_init(i, j, k)
+        end do
+      end do
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(u, v, h)
-#endif
 
     print '(A)', ''
     print '(A)', 'Running vertical viscosity solver...'
@@ -140,40 +130,35 @@ program vert_visc_driver
 
     do iter = 1, niter
         ! Reset velocities each iteration for timing consistency
-        do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+        do k=1,nk
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             u(i, j, k) = u_init(i, j, k)
             v(i, j, k) = v_init(i, j, k)
+            end do
+          end do
         end do
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target update to(u, v)
-#endif
 
         ! Compute coefficients (harmonic mean + upwind switching)
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call vert_visc_coef(u, v, h, CS, G, GV)
-        t_end = omp_get_wtime()
-        t_coef = t_coef + (t_end - t_start)
+        call system_clock(clock_end)
+        t_coef = t_coef + real(clock_end - clock_start, dp) / real(clock_rate, dp)
 
         ! Compute remnant velocity fractions (with Rayleigh drag)
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call vert_visc_remnant(dt, CS, G, GV, visc)
-        t_end = omp_get_wtime()
-        t_remnant = t_remnant + (t_end - t_start)
+        call system_clock(clock_end)
+        t_remnant = t_remnant + real(clock_end - clock_start, dp) / real(clock_rate, dp)
 
         ! Apply viscosity (with surface stress and Rayleigh drag)
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call vert_visc_apply(u, v, h, dt, CS, G, GV, forces, visc)
-        t_end = omp_get_wtime()
-        t_apply = t_apply + (t_end - t_start)
+        call system_clock(clock_end)
+        t_apply = t_apply + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
 
     t_total = t_coef + t_remnant + t_apply
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: u, v)
-    !$omp target update from(CS%taux_bot, CS%tauy_bot)
-    !$omp target exit data map(delete: h, u_init, v_init)
-#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

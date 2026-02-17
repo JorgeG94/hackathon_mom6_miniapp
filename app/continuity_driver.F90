@@ -1,6 +1,5 @@
 !> Standalone driver for the continuity miniapp
 program continuity_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, BT_cont_type, alloc_BT_cont_type
@@ -17,6 +16,7 @@ program continuity_driver
 
     real(dp) :: dt, t_start, t_end, t_total
     integer :: ni, nj, nk, niter, iter, i, j, k
+    integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
 
     ! Default parameters
@@ -57,16 +57,16 @@ program continuity_driver
     allocate (u(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (uh(G%isd:G%ied, G%jsd:G%jed, nk))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: h, hin, u, uh)
-#endif
-
     ! Initialize state
-    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
         hin(i, j, k) = 4000.0_dp/real(nk, dp) + 10.0_dp*sin(real(i - 1, dp)/real(ni, dp)*3.14159_dp)* &
                        cos(real(j - 1, dp)/real(nj, dp)*3.14159_dp)*exp(-real(k, dp)/20.0_dp)
         h(i, j, k) = hin(i, j, k)
         u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)*exp(-real(k, dp)/30.0_dp)
+        end do
+      end do
     end do
 
     print *, G%jsc, G%jec, G%isc, G%iec
@@ -79,21 +79,20 @@ program continuity_driver
 
     do iter = 1, niter
         ! Reset state
-        do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+        do k=1,nk
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             h(i, j, k) = hin(i, j, k)
+            end do
+          end do
         end do
 
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call continuity_PPM(u, hin, h, uh, dt, G, GV, CS, por_face_areaU, uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
-        t_end = omp_get_wtime()
+        call system_clock(clock_end)
 
-        t_total = t_total + (t_end - t_start)
+        t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: h)
-    !$omp target exit data map(delete: hin, u, uh, uhbt, u_cor, du_cor)
-#endif
 
     print '(A)', ''
     print '(A)', '=================================================='

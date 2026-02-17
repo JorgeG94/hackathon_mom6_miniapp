@@ -1,7 +1,7 @@
 !> MOM6 Vertical Viscosity Module
 !!
 !! Applies vertical viscosity to momentum using a tridiagonal solver.
-!! Realistic version ported from MOM6's MOM_vert_friction.F90 for GPU hackathon.
+!! Realistic version ported from MOM6's MOM_vert_friction.F90.
 !!
 !! Key features from real MOM6:
 !!   - Harmonic-mean thickness with velocity-dependent upwind switching
@@ -11,8 +11,6 @@
 !!   - Bottom stress output
 !!   - Kv_extra_bbl path (scalar, botfn-based)
 !!
-!! GPU Pattern: Parallelizes over horizontal columns (i,j) with collapse(2),
-!! sequential tridiagonal solve in k (each column independent).
 !!
 module mom6_vert_visc
     use iso_fortran_env, only: dp => real64
@@ -109,12 +107,6 @@ contains
         allocate (CS%taux_bot(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (CS%tauy_bot(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
 
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: CS%a_u, CS%a_v, CS%h_u, CS%h_v)
-        !$omp target enter data map(alloc: CS%visc_rem_u, CS%visc_rem_v)
-        !$omp target enter data map(alloc: CS%taux_bot, CS%tauy_bot)
-#endif
-
         CS%initialized = .true.
 
     end subroutine vert_visc_init
@@ -124,12 +116,6 @@ contains
         type(vert_visc_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: CS%a_u, CS%a_v, CS%h_u, CS%h_v)
-        !$omp target exit data map(delete: CS%visc_rem_u, CS%visc_rem_v)
-        !$omp target exit data map(delete: CS%taux_bot, CS%tauy_bot)
-#endif
 
         if (allocated(CS%a_u)) deallocate (CS%a_u)
         if (allocated(CS%a_v)) deallocate (CS%a_v)
@@ -166,7 +152,8 @@ contains
         I_Hbbl = 1.0_dp / (CS%Hbbl + h_neglect)
 
         ! --- U-points ---
-        do concurrent(j=js:je, i=is - 1:ie)
+        do j=js,je
+        do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
 
                 ! Bottom-up: compute harmonic mean thickness with upwind switching
@@ -233,9 +220,11 @@ contains
                 end do
             end if
         end do
+        end do
 
         ! --- V-points ---
-        do concurrent(j=js - 1:je, i=is:ie)
+        do j=js - 1,je
+        do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
 
                 z_i(nz + 1) = 0.0_dp
@@ -293,6 +282,7 @@ contains
                 end do
             end if
         end do
+        end do
 
     end subroutine vert_visc_coef
 
@@ -320,7 +310,8 @@ contains
         if (present(visc)) have_rayleigh = visc%has_Rayleigh
 
         ! --- U-points ---
-        do concurrent(j=js:je, i=is - 1:ie)
+        do j=js,je
+        do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
 
                 Ray = 0.0_dp
@@ -355,9 +346,11 @@ contains
                 end do
             end if
         end do
+        end do
 
         ! --- V-points ---
-        do concurrent(j=js - 1:je, i=is:ie)
+        do j=js - 1,je
+        do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
 
                 Ray = 0.0_dp
@@ -388,6 +381,7 @@ contains
                     CS%visc_rem_v(i, j, k) = 1.0_dp
                 end do
             end if
+        end do
         end do
 
     end subroutine vert_visc_remnant
@@ -420,7 +414,8 @@ contains
         if (present(visc)) have_rayleigh = visc%has_Rayleigh
 
         ! --- Apply to u-velocity ---
-        do concurrent(j=js:je, i=is - 1:ie)
+        do j=js,je
+        do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
 
                 ! Surface stress BC
@@ -464,9 +459,11 @@ contains
 
             end if
         end do
+        end do
 
         ! --- Apply to v-velocity ---
-        do concurrent(j=js - 1:je, i=is:ie)
+        do j=js - 1,je
+        do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
 
                 sfc_stress = 0.0_dp
@@ -503,6 +500,7 @@ contains
                 end if
 
             end if
+        end do
         end do
 
     end subroutine vert_visc_apply

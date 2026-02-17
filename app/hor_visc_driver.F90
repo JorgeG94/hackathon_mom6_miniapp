@@ -1,7 +1,7 @@
 !> Standalone driver for the horizontal viscosity miniapp
 !!
 !! This driver demonstrates realistic MOM6 horizontal viscosity computation
-!! with multiple physics schemes and mixed GPU/CPU execution patterns.
+!! with multiple physics schemes.
 !!
 !! Usage:
 !!   ./hor_visc_driver [ni] [nj] [nk] [niter] [options]
@@ -10,7 +10,7 @@
 !!   --laplacian    Enable Laplacian viscosity only (default)
 !!   --biharmonic   Enable biharmonic (4th order) viscosity
 !!   --smagorinsky  Enable Smagorinsky dynamic viscosity
-!!   --leith        Enable Leith vorticity-gradient viscosity (CPU/GPU mixed)
+!!   --leith        Enable Leith vorticity-gradient viscosity
 !!   --no-slip      Use no-slip boundary conditions (vs free-slip)
 !!   --better-bound Use thickness-aware stability bounding
 !!   --full         Enable all schemes (biharmonic + smagorinsky + leith + better-bound)
@@ -19,11 +19,10 @@
 !! Examples:
 !!   ./hor_visc_driver 180 180 75 10              # Simple Laplacian
 !!   ./hor_visc_driver 180 180 75 10 --biharmonic --smagorinsky
-!!   ./hor_visc_driver 180 180 75 10 --leith      # Demonstrates CPU/GPU mixed execution
+!!   ./hor_visc_driver 180 180 75 10 --leith      # Leith vorticity viscosity
 !!   ./hor_visc_driver 180 180 75 10 --full       # All features enabled
 !!
 program hor_visc_driver
-    use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid
@@ -43,6 +42,7 @@ program hor_visc_driver
     real(dp) :: t_start, t_end, t_total
     real(dp) :: Kh, Ah
     integer :: ni, nj, nk, niter, iter, i, j, k, arg_idx
+    integer :: clock_start, clock_end, clock_rate
     character(len=64) :: arg
     character(len=256) :: schemes_str
 
@@ -143,14 +143,6 @@ program hor_visc_driver
     if (use_biharmonic) print '(A,ES12.4)', '  Ah (Biharmonic) [m4/s]: ', Ah
     print '(A)', '=================================================================='
 
-    if (use_leith) then
-        print '(A)', ''
-        print '(A)', 'NOTE: Leith viscosity uses CPU-only vorticity gradient calculation'
-        print '(A)', '      with explicit GPU<->CPU data transfers (!$omp target update).'
-        print '(A)', '      This demonstrates the real MOM6 GPU porting challenge.'
-        print '(A)', ''
-    end if
-
     ! Initialize grid
     call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
     call init_verticalGrid(GV, nk)
@@ -177,14 +169,11 @@ program hor_visc_driver
     allocate (vh(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (FrictWork(G%isd:G%ied, G%jsd:G%jed, nk))
 
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target enter data map(alloc: u, v, h, u_init, v_init, diffu, diffv)
-    !$omp target enter data map(alloc: uh, vh, FrictWork)
-#endif
-
     ! Initialize state with horizontal structure that should be smoothed
     ! Use different patterns to exercise different viscosity schemes
-    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
         ! Layer thickness with some variation (for better_bound testing)
         h(i, j, k) = 4000.0_dp/real(nk, dp)*(1.0_dp + &
                                              0.1_dp*sin(real(i - 1, dp)/real(ni, dp)*6.28318_dp)* &
@@ -210,21 +199,20 @@ program hor_visc_driver
 
         u(i, j, k) = u_init(i, j, k)
         v(i, j, k) = v_init(i, j, k)
+        end do
+      end do
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(u, v, h)
-#endif
 
     ! Compute simple transports: uh = u * 0.5*(h(i,j) + h(i+1,j)) * dy
-    do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
         uh(i, j, k) = u(i, j, k)*0.5_dp*(h(i, j, k) + h(min(i + 1, G%ied), j, k))*G%dyCu(i, j)
         vh(i, j, k) = v(i, j, k)*0.5_dp*(h(i, j, k) + h(i, min(j + 1, G%jed), k))*G%dxCv(i, j)
+        end do
+      end do
     end do
     FrictWork = 0.0_dp
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target update to(uh, vh)
-#endif
 
     print '(A)', ''
     print '(A)', 'Running horizontal viscosity solver...'
@@ -233,25 +221,21 @@ program hor_visc_driver
 
     do iter = 1, niter
         ! Reset velocities each iteration for timing consistency
-        do concurrent(k=1:nk, j=G%jsd:G%jed, i=G%isd:G%ied)
+        do k=1,nk
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
             u(i, j, k) = u_init(i, j, k)
             v(i, j, k) = v_init(i, j, k)
+            end do
+          end do
         end do
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target update to(u, v)
-#endif
 
         ! Compute horizontal viscous accelerations
-        t_start = omp_get_wtime()
+        call system_clock(clock_start, clock_rate)
         call hor_visc(u, v, h, diffu, diffv, G, GV, CS, uh, vh, FrictWork)
-        t_end = omp_get_wtime()
-        t_total = t_total + (t_end - t_start)
+        call system_clock(clock_end)
+        t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
-
-#ifdef __NVCOMPILER_LLVM__
-    !$omp target exit data map(from: u, v, diffu, diffv, FrictWork)
-    !$omp target exit data map(delete: h, u_init, v_init, uh, vh)
-#endif
 
     print '(A)', ''
     print '(A)', '=================================================================='
@@ -298,8 +282,7 @@ contains
         print '(A)', '  ./hor_visc_driver 180 180 75 10 --leith'
         print '(A)', '  ./hor_visc_driver 180 180 75 10 --full'
         print '(A)', ''
-        print '(A)', 'The --leith option demonstrates mixed GPU/CPU execution with'
-        print '(A)', 'explicit data transfers, representing real MOM6 porting challenges.'
+        print '(A)', 'The --leith option enables Leith vorticity-gradient viscosity.'
     end subroutine print_help
 
     subroutine verify_hor_visc(u, v, diffu, diffv, FrictWork, G, GV, CS)

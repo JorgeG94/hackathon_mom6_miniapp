@@ -19,7 +19,6 @@ copyright = "2025"
 auto-executables = true
 auto-tests = false
 auto-examples = false
-external-modules = ["nvtx"]
 
 [preprocess]
 [preprocess.cpp]
@@ -58,7 +57,6 @@ main = "rk2_driver.F90"
 
 # Dependencies (none for this self-contained package)
  [dependencies]
- openmp="*"
 # stdlib = "*"
 [extra.fortitude.check]
 select = ["C", "E", "S"]

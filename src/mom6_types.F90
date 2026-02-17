@@ -169,23 +169,12 @@ contains
         allocate (G%mask2dCv(G%isd:G%ied, G%jsd:G%jed))
 
         ! Initialize uniform grid metrics
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(to: G)
-        !$omp target enter data map(alloc: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target enter data map(alloc: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
-        !$omp target enter data map(alloc: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
-        !$omp target enter data map(alloc: G%IareaBu, G%areaBu, G%CoriolisBu)
-        !$omp target enter data map(alloc: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
-        !$omp target enter data map(alloc: G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
-#endif
 
         ! Beta-plane Coriolis: f = f0 + beta*y
         f0 = 2.0_dp*OMEGA*sin(lat_deg*3.14159265358979_dp/180.0_dp)
         beta = 2.0_dp*OMEGA*cos(lat_deg*3.14159265358979_dp/180.0_dp)/6.371e6_dp
 
-        ! I still don't understand why I haven't been able to initialize this on the device
-        ! Initialize grid metrics on HOST (using regular loops, not do concurrent)
-        ! This ensures host has valid data for diagnostics/verification
+        ! Initialize grid metrics
         do j = G%jsd, G%jed
             do i = G%isd, G%ied
                 G%areaT(i, j) = dx_m*dx_m
@@ -221,16 +210,6 @@ contains
             end do
         end do
 
-        ! Copy grid data from host to device
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target update to(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target update to(G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
-        !$omp target update to(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
-        !$omp target update to(G%IareaBu, G%areaBu, G%CoriolisBu)
-        !$omp target update to(G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
-        !$omp target update to(G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
-#endif
-
         G%first_direction = 0
 
     end subroutine init_ocean_grid
@@ -238,15 +217,6 @@ contains
     !> Deallocate grid arrays
     subroutine end_ocean_grid(G)
         type(ocean_grid_type), intent(inout) :: G
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$omp target exit data map(delete: G%dxCu, G%dyCu, G%IdxCu, G%IdyCu)
-        !$omp target exit data map(delete: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
-        !$omp target exit data map(delete: G%IareaBu, G%areaBu, G%CoriolisBu)
-        !$omp target exit data map(delete: G%IareaCu, G%IareaCv, G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
-        !$omp target exit data map(delete: G%bathyT, G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
-#endif
 
         if (allocated(G%IareaT)) deallocate (G%IareaT)
         if (allocated(G%areaT)) deallocate (G%areaT)
@@ -335,19 +305,11 @@ contains
         allocate (forces%taux(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (forces%tauy(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
 
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target enter data map(alloc: forces%taux, forces%tauy)
-#endif
-
     end subroutine init_mech_forcing
 
     !> Deallocate mechanical forcing arrays
     subroutine end_mech_forcing(forces)
         type(mech_forcing_type), intent(inout) :: forces
-
-#ifdef __NVCOMPILER_LLVM__
-        !$omp target exit data map(delete: forces%taux, forces%tauy)
-#endif
 
         if (allocated(forces%taux)) deallocate (forces%taux)
         if (allocated(forces%tauy)) deallocate (forces%tauy)
@@ -370,10 +332,6 @@ contains
         if (visc%has_Rayleigh) then
             allocate (visc%Ray_u(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
             allocate (visc%Ray_v(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
-
-#ifdef __NVCOMPILER_LLVM__
-            !$omp target enter data map(alloc: visc%Ray_u, visc%Ray_v)
-#endif
         end if
 
     end subroutine init_vertvisc_visc
@@ -381,12 +339,6 @@ contains
     !> Deallocate vertvisc_type arrays
     subroutine end_vertvisc_visc(visc)
         type(vertvisc_type), intent(inout) :: visc
-
-#ifdef __NVCOMPILER_LLVM__
-        if (allocated(visc%Ray_u)) then
-            !$omp target exit data map(delete: visc%Ray_u, visc%Ray_v)
-        end if
-#endif
 
         if (allocated(visc%Ray_u)) deallocate (visc%Ray_u)
         if (allocated(visc%Ray_v)) deallocate (visc%Ray_v)
