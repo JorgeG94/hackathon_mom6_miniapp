@@ -8,8 +8,8 @@
 #
 # Produces: vert_visc_driver_jik, vert_visc_driver_ijk, etc.
 
-FC=${1:-gfortran}
-GPU=${2:-no}
+FC=${1:-nvfortran}
+GPU=${2:-yes}
 
 VARIANTS="jik ijk jki ikj kji kij"
 
@@ -24,7 +24,7 @@ for v in $VARIANTS; do
     make clean -s 2>/dev/null
     make FC=$FC GPU=$GPU VERTVISC_VARIANT=$v vert_visc_driver 2>&1 | tail -1
     if [ $? -eq 0 ]; then
-        mv vert_visc_driver vert_visc_driver_$v
+        mv vert_visc_driver ../vert_visc_driver_$v
         echo "  -> vert_visc_driver_$v"
     else
         echo "  FAILED to build $v"

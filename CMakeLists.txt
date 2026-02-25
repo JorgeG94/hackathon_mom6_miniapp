@@ -31,8 +31,8 @@ if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
     # Detect GPU architecture
     if(NOT DEFINED GPU_ARCH)
       set(GPU_ARCH
-          "cc70"
-          CACHE STRING "GPU architecture (e.g., cc70, cc80, cc90)")
+          "cc100"
+          CACHE STRING "GPU architecture (e.g., cc70, cc80, cc90, cc100)")
     endif()
     set(CMAKE_Fortran_FLAGS
         "${CMAKE_Fortran_FLAGS} -gpu=${GPU_ARCH} -Minfo=accel")
@@ -129,9 +129,9 @@ target_link_libraries(barotropic_driver PRIVATE mom6_modules)
 target_include_directories(barotropic_driver PRIVATE ${CMAKE_BINARY_DIR}/mod)
 
 # Vertical viscosity driver
-add_executable(vert_visc_driver app/vert_visc_driver.F90)
-target_link_libraries(vert_visc_driver PRIVATE mom6_modules)
-target_include_directories(vert_visc_driver PRIVATE ${CMAKE_BINARY_DIR}/mod)
+#add_executable(vert_visc_driver app/vert_visc_driver.F90)
+#target_link_libraries(vert_visc_driver PRIVATE mom6_modules)
+#target_include_directories(vert_visc_driver PRIVATE ${CMAKE_BINARY_DIR}/mod)
 
 # Horizontal viscosity driver
 add_executable(hor_visc_driver app/hor_visc_driver.F90)

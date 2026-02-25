@@ -50,8 +50,8 @@ BUILDDIR = build
 ifneq (,$(findstring nvfortran,$(FC)))
   ifeq ($(GPU),yes)
     # NVIDIA GPU offloading with OpenMP target + stdpar
-    FFLAGS = -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -Minfo=accel -gpu=mem:separate
-    LDFLAGS = -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc70 -cudalib=nvtx
+    FFLAGS = -O3 -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc100 -Minfo=accel -gpu=mem:separate -gpu=fastmath
+    LDFLAGS = -mp=multicore,gpu -stdpar=multicore,gpu -gpu=cc100 -cudalib=nvtx
   else
     # CPU-only with OpenMP
     FFLAGS = -O3 -mp -Minfo=opt
@@ -118,7 +118,7 @@ MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
           $(BUILDDIR)/mom6_diag.o
 
 # Driver executables
-DRIVERS = continuity_driver coriolis_driver barotropic_driver vert_visc_driver hor_visc_driver rk2_driver
+DRIVERS = continuity_driver coriolis_driver coriolis_compare_driver coriolis_cuda_driver barotropic_driver vert_visc_driver hor_visc_driver rk2_driver
 
 # All vertical viscosity loop ordering variants
 VERTVISC_VARIANTS = jik ijk jki ikj kji kij
@@ -147,6 +147,12 @@ $(BUILDDIR)/mom6_continuity.o: $(SRCDIR)/mom6_continuity.F90 $(BUILDDIR)/mom6_ty
 $(BUILDDIR)/mom6_coriolis.o: $(SRCDIR)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
+$(BUILDDIR)/mom6_coriolis_orig.o: $(SRCDIR)/mom6_coriolis_orig.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_coriolis_cuda.o: $(SRCDIR)/mom6_coriolis_cuda.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
 $(BUILDDIR)/mom6_barotropic.o: $(SRCDIR)/mom6_barotropic.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
@@ -172,6 +178,19 @@ continuity_driver: $(APPDIR)/continuity_driver.F90 $(BUILDDIR)/mom6_types.o $(BU
 coriolis_driver: $(APPDIR)/coriolis_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o $(LDFLAGS)
 
+CORIOLIS_COMPARE_OBJS = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o \
+                        $(BUILDDIR)/mom6_coriolis_orig.o \
+                        $(BUILDDIR)/mom6_coriolis_cuda.o
+
+coriolis_compare_driver: $(APPDIR)/coriolis_compare_driver.F90 $(CORIOLIS_COMPARE_OBJS)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(CORIOLIS_COMPARE_OBJS) $(LDFLAGS) -cuda
+
+CORIOLIS_CUDA_OBJS = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o \
+                     $(BUILDDIR)/mom6_coriolis_cuda.o
+
+coriolis_cuda_driver: $(APPDIR)/coriolis_cuda_driver.F90 $(CORIOLIS_CUDA_OBJS)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(CORIOLIS_CUDA_OBJS) $(LDFLAGS) -cuda
+
 barotropic_driver: $(APPDIR)/barotropic_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(LDFLAGS)
 
@@ -189,7 +208,7 @@ rk2_driver: $(APPDIR)/rk2_driver.F90 $(MODULES)
 #==============================================================================
 
 clean:
-	rm -f $(DRIVERS) $(foreach v,$(VERTVISC_VARIANTS),vert_visc_driver_$(v)) *.o *.mod
+	rm -f $(DRIVERS) coriolis_compare_driver $(foreach v,$(VERTVISC_VARIANTS),vert_visc_driver_$(v)) *.o *.mod
 	rm -rf $(BUILDDIR)
 
 info:
@@ -219,6 +238,10 @@ run-continuity: continuity_driver
 run-coriolis: coriolis_driver
 	@echo "Running Coriolis driver (180x180x75, 10 iters, Sadourny)..."
 	./coriolis_driver 180 180 75 10 sadourny
+
+run-coriolis-compare: coriolis_compare_driver
+	@echo "Running Coriolis A/B comparison (180x180x75, 10 iters)..."
+	./coriolis_compare_driver 180 180 75 10
 
 run-barotropic: barotropic_driver
 	@echo "Running Barotropic driver (180x180, 30 substeps, 10 iters)..."
