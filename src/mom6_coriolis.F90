@@ -79,6 +79,21 @@ contains
         end do
         end do
 
+        ! Copy derived type descriptors to GPU first, then attach members
+        !$acc enter data copyin(CS)
+        !$acc enter data create(CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort, &
+        !$acc&                   CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, &
+        !$acc&                   CS%Area_q, CS%KE, CS%a, CS%b, CS%c, CS%d)
+
+        ! Update Area_q on device (precomputed above)
+        !$acc update device(CS%Area_q)
+
+        ! Copy grid descriptor to GPU, then attach metric arrays
+        !$acc enter data copyin(G)
+        !$acc enter data copyin(G%dyCv, G%dxCu, G%areaT, G%mask2dBu, &
+        !$acc&                   G%IareaBu, G%CoriolisBu, G%dyCu, G%dxCv, &
+        !$acc&                   G%IdxCu, G%IdyCv)
+
         CS%initialized = .true.
 
     end subroutine coriolis_init
@@ -88,6 +103,12 @@ contains
         type(coriolis_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
+
+        ! Detach member arrays from GPU, then delete derived type descriptor
+        !$acc exit data delete(CS%dvdx, CS%dudy, CS%rel_vort, CS%abs_vort, &
+        !$acc&                  CS%q, CS%Ih_q, CS%hArea_u, CS%hArea_v, &
+        !$acc&                  CS%Area_q, CS%KE, CS%a, CS%b, CS%c, CS%d)
+        !$acc exit data delete(CS)
 
         if (allocated(CS%dvdx)) deallocate (CS%dvdx)
         if (allocated(CS%dudy)) deallocate (CS%dudy)
@@ -127,10 +148,13 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         vol_neglect = 1.0e-20_dp
 
+        !$acc data copyin(u, v, h, uh, vh) copyout(CAu, CAv)
+
         ! Loop over layers
         do k = 1, nz
 
             ! Compute circulation terms
+            !$acc parallel loop collapse(2)
             do j=js - 1,je
             do i=is - 1,ie
                 CS%dvdx(i, j) = (v(i + 1, j, k)*G%dyCv(i + 1, j)) - (v(i, j, k)*G%dyCv(i, j))
@@ -139,12 +163,14 @@ contains
             end do
 
             ! Compute thickness-weighted areas at velocity points
+            !$acc parallel loop collapse(2)
             do j=js - 1,je
             do i=is,ie + 1
                 CS%hArea_v(i, j) = 0.5_dp*((G%areaT(i, j)*h(i, j, k)) + (G%areaT(i, j + 1)*h(i, j + 1, k)))
             end do
             end do
 
+            !$acc parallel loop collapse(2)
             do j=js,je + 1
             do i=is - 1,ie
                 CS%hArea_u(i, j) = 0.5_dp*((G%areaT(i, j)*h(i, j, k)) + (G%areaT(i + 1, j)*h(i + 1, j, k)))
@@ -152,6 +178,7 @@ contains
             end do
 
             ! Compute vorticity and potential vorticity
+            !$acc parallel loop collapse(2)
             do j=js - 1,je
             do i=is - 1,ie
                 CS%rel_vort(i, j) = G%mask2dBu(i, j)*(CS%dvdx(i, j) - CS%dudy(i, j))*G%IareaBu(i, j)
@@ -159,6 +186,7 @@ contains
             end do
             end do
 
+            !$acc parallel loop collapse(2)
             do j=js - 1,je
             do i=is - 1,ie
                 hArea_q = (CS%hArea_u(i, j) + CS%hArea_u(i, j + 1)) + (CS%hArea_v(i, j) + CS%hArea_v(i + 1, j))
@@ -169,12 +197,14 @@ contains
 
             ! Compute Arakawa scheme coefficients if needed
             if (CS%Coriolis_Scheme == ARAKAWA_HSU90) then
+                !$acc parallel loop collapse(2)
                 do j=js,je
                 do i=is - 1,ie
                     CS%a(i, j) = (CS%q(i, j) + (CS%q(i + 1, j) + CS%q(i, j - 1)))*C1_12
                     CS%d(i, j) = ((CS%q(i, j) + CS%q(i + 1, j - 1)) + CS%q(i, j - 1))*C1_12
                 end do
                 end do
+                !$acc parallel loop collapse(2)
                 do j=js,je
                 do i=is,ie
                     CS%b(i, j) = (CS%q(i, j) + (CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_12
@@ -182,6 +212,7 @@ contains
                 end do
                 end do
             elseif (CS%Coriolis_Scheme == ARAKAWA_LAMB81) then
+                !$acc parallel loop collapse(2)
                 do j=js,je
                 do i=is,ie
                     CS%a(i - 1, j) = (2.0_dp*(CS%q(i, j) + CS%q(i - 1, j - 1)) + (CS%q(i - 1, j) + CS%q(i, j - 1)))*C1_24
@@ -193,6 +224,7 @@ contains
             end if
 
             ! Compute kinetic energy
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie
                 CS%KE(i, j) = 0.25_dp*( &
@@ -205,6 +237,7 @@ contains
             ! Compute Coriolis accelerations based on scheme
             if (CS%Coriolis_Scheme == SADOURNY75_ENERGY) then
                 ! Energy-conserving Sadourny (1975) scheme
+                !$acc parallel loop collapse(2)
                 do j=js,je
                 do i=is,ie - 1
                     KEx = (CS%KE(i + 1, j) - CS%KE(i, j))*G%IdxCu(i, j)
@@ -215,6 +248,7 @@ contains
                 end do
                 end do
 
+                !$acc parallel loop collapse(2)
                 do j=js,je - 1
                 do i=is,ie
                     KEy = (CS%KE(i, j + 1) - CS%KE(i, j))*G%IdyCv(i, j)
@@ -226,6 +260,7 @@ contains
                 end do
 
             else  ! ARAKAWA_HSU90 or ARAKAWA_LAMB81
+                !$acc parallel loop collapse(2)
                 do j=js,je
                 do i=is,ie - 1
                     KEx = (CS%KE(i + 1, j) - CS%KE(i, j))*G%IdxCu(i, j)
@@ -236,6 +271,7 @@ contains
                 end do
                 end do
 
+                !$acc parallel loop collapse(2)
                 do j=js,je - 1
                 do i=is,ie
                     KEy = (CS%KE(i, j + 1) - CS%KE(i, j))*G%IdyCv(i, j)
@@ -248,6 +284,8 @@ contains
             end if
 
         end do  ! k loop
+
+        !$acc end data
 
     end subroutine CorAdCalc
 

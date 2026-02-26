@@ -98,6 +98,7 @@ program coriolis_driver
 
     t_total = 0.0_dp
 
+    !$acc data copyin(u, v, h, uh, vh) copy(CAu, CAv)
     do iter = 1, niter
         call system_clock(clock_start, clock_rate)
         call CorAdCalc(u, v, h, uh, vh, CAu, CAv, G, GV, CS)
@@ -105,6 +106,7 @@ program coriolis_driver
 
         t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
+    !$acc end data
 
     print '(A)', ''
     print '(A)', '=================================================='

@@ -16,7 +16,7 @@ endif()
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -acc -Minfo=accel")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
