@@ -136,7 +136,7 @@ program rk2_driver
     call init_verticalGrid(GV, nk)
     call continuity_init(cont_CS, G, GV, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
     call alloc_BT_cont_type(BT_cont, G, GV)
-    call coriolis_init(cor_CS, G, SADOURNY75_ENERGY)
+    call coriolis_init(cor_CS, G, GV, SADOURNY75_ENERGY)
     call barotropic_init(bt_CS, G, dt, bt_nsteps)
     call vert_visc_init(visc_CS, G, GV, Kv=1.0e-4_dp, Kv_ml=1.0e-2_dp, &
                         Kv_extra_bbl=1.0e-2_dp, Hmix=50.0_dp)

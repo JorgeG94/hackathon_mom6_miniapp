@@ -67,7 +67,7 @@ program coriolis_driver
     ! Initialize grid
     call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
     call init_verticalGrid(GV, nk)
-    call coriolis_init(CS, G, scheme)
+    call coriolis_init(CS, G, GV, scheme)
 
     ! Allocate state arrays
     allocate (u(G%isd:G%ied, G%jsd:G%jed, nk))
