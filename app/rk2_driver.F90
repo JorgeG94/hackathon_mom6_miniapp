@@ -135,6 +135,7 @@ program rk2_driver
     print '(A)', '=================================================='
 
     ! Initialize grids and control structures
+    call profiler_start("Initializatoin")
     call system_clock(init_clock_start, init_clock_rate)
     call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
     call init_verticalGrid(GV, nk)
@@ -209,6 +210,7 @@ program rk2_driver
     ! Update forces/visc data that was filled after their init (init did copyin with zeros)
     !$acc update device(forces%taux, forces%tauy)
     !$acc update device(visc%Ray_u, visc%Ray_v)
+    call profiler_stop("Initializatoin")
 
     call system_clock(init_clock_end)
     t_init = real(init_clock_end - init_clock_start, dp) / real(init_clock_rate, dp)
