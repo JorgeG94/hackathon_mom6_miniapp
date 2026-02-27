@@ -1,6 +1,6 @@
 !> Standalone driver for the barotropic solver miniapp
 program barotropic_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid
     use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
     implicit none
@@ -13,6 +13,7 @@ program barotropic_driver
     real(dp), allocatable :: eta_init(:, :)
 
     real(dp) :: t_start, t_end, t_total, dt
+    integer(int64) :: total_bytes
     integer :: ni, nj, niter, iter, i, j, nsteps
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
@@ -68,6 +69,15 @@ program barotropic_driver
         vbt_in(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp)
       end do
     end do
+
+    ! Memory usage report
+    total_bytes = G%nbytes + CS%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  barotropic_CS:    ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
 
     print '(A)', ''
     print '(A)', 'Running barotropic solver...'

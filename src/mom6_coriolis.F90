@@ -6,7 +6,7 @@
 !! Original code from: src/core/MOM_CoriolisAdv.F90
 !!
 module mom6_coriolis
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type
     implicit none
     private
@@ -29,6 +29,7 @@ module mom6_coriolis
         real(dp), allocatable :: q(:, :, :)          ! 3D potential vorticity
         real(dp), allocatable :: KE(:, :, :)         ! 3D kinetic energy
         real(dp), allocatable :: a(:, :, :), b(:, :, :), c(:, :, :), d(:, :, :)  ! 3D, conditional
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type coriolis_CS
 
     real(dp), parameter :: C1_12 = 1.0_dp/12.0_dp
@@ -61,6 +62,14 @@ contains
             allocate (CS%b(G%isd:G%ied, G%jsd:G%jed, GV%ke))
             allocate (CS%c(G%isd:G%ied, G%jsd:G%jed, GV%ke))
             allocate (CS%d(G%isd:G%ied, G%jsd:G%jed, GV%ke))
+        end if
+
+        ! Compute total bytes: 1 2D + 2 3D always, +4 3D if not Sadourny
+        CS%nbytes = (int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64)) &
+            * (1_int64 + 2_int64 * int(GV%ke, int64)) * 8_int64
+        if (CS%Coriolis_Scheme /= SADOURNY75_ENERGY) then
+            CS%nbytes = CS%nbytes + 4_int64 * int(G%ied - G%isd + 1, int64) &
+                * int(G%jed - G%jsd + 1, int64) * int(GV%ke, int64) * 8_int64
         end if
 
         ! Precompute Area_q (sum of 4 neighboring h-cell areas)

@@ -7,7 +7,7 @@
 !! Original code from: src/core/MOM_barotropic.F90
 !!
 module mom6_barotropic
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, G_EARTH
     implicit none
     private
@@ -54,6 +54,8 @@ module mom6_barotropic
         real(dp), allocatable :: vbt_av(:, :)   ! Time-averaged vbt [L T-1]
         real(dp), allocatable :: uhbt_av(:, :)  ! Time-averaged uhbt [H L2 T-1]
         real(dp), allocatable :: vhbt_av(:, :)  ! Time-averaged vhbt [H L2 T-1]
+
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type barotropic_CS
 
 contains
@@ -101,6 +103,9 @@ contains
         allocate (CS%vbt_av(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%uhbt_av(G%isd:G%ied, G%jsd:G%jed))
         allocate (CS%vhbt_av(G%isd:G%ied, G%jsd:G%jed))
+
+        ! Compute total bytes: 24 2D + 2 arrays of (4,ni,nj) = 24 + 8 = 32 2D equivalents
+        CS%nbytes = 32_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
 
         ! Initialize grid-related arrays
         do j=G%jsd,G%jed

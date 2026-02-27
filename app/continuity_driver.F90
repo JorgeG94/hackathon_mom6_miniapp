@@ -1,6 +1,6 @@
 !> Standalone driver for the continuity miniapp
 program continuity_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, BT_cont_type, alloc_BT_cont_type
     use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
@@ -15,6 +15,7 @@ program continuity_driver
     real(dp), allocatable :: uh(:, :, :), uhbt(:, :), u_cor(:, :, :), du_cor(:, :)
 
     real(dp) :: dt, t_start, t_end, t_total
+    integer(int64) :: total_bytes
     integer :: ni, nj, nk, niter, iter, i, j, k
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
@@ -71,6 +72,16 @@ program continuity_driver
 
     print *, G%jsc, G%jec, G%isc, G%iec
     print *, sum(hin(G%isc:G%iec, G%jsc:G%jec, :)), sum(h(G%isc:G%iec, G%jsc:G%jec, :))
+
+    ! Memory usage report
+    total_bytes = G%nbytes + CS%nbytes + BT_cont%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  continuity_CS:    ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  BT_cont_type:     ', real(BT_cont%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
 
     print '(A)', ''
     print '(A)', 'Running continuity solver...'

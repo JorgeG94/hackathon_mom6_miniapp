@@ -23,7 +23,7 @@
 !!   ./hor_visc_driver 180 180 75 10 --full       # All features enabled
 !!
 program hor_visc_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
@@ -41,6 +41,7 @@ program hor_visc_driver
 
     real(dp) :: t_start, t_end, t_total
     real(dp) :: Kh, Ah
+    integer(int64) :: total_bytes
     integer :: ni, nj, nk, niter, iter, i, j, k, arg_idx
     integer :: clock_start, clock_end, clock_rate
     character(len=64) :: arg
@@ -214,6 +215,15 @@ program hor_visc_driver
     end do
     FrictWork = 0.0_dp
 
+    print '(A)', ''
+    ! Memory usage report
+    total_bytes = G%nbytes + CS%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  hor_visc_CS:      ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
     print '(A)', ''
     print '(A)', 'Running horizontal viscosity solver...'
 

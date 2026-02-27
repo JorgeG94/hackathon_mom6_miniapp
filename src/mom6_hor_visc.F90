@@ -19,7 +19,7 @@
 !!
 !!
 module mom6_hor_visc
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type
     implicit none
     private
@@ -149,6 +149,7 @@ module mom6_hor_visc
         real(dp), allocatable :: grad_div_mag_h(:, :)  ! |grad(div)| at h-points [L-1 T-1]
         real(dp), allocatable :: grad_div_mag_q(:, :)  ! |grad(div)| at q-points [L-1 T-1]
 
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type hor_visc_CS
 
     real(dp), parameter :: inv_PI3 = 1.0_dp/(3.14159265358979_dp**3)
@@ -402,6 +403,9 @@ contains
         allocate (CS%div_xx_dy(isd:ied, jsd:jed))
         allocate (CS%grad_div_mag_h(isd:ied, jsd:jed))
         allocate (CS%grad_div_mag_q(isd:ied, jsd:jed))
+
+        ! Compute total bytes: 62 2D arrays of real(dp)
+        CS%nbytes = 62_int64 * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * 8_int64
 
     end subroutine allocate_hor_visc_arrays
 

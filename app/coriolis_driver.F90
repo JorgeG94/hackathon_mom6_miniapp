@@ -1,6 +1,6 @@
 !> Standalone driver for the Coriolis/momentum advection miniapp
 program coriolis_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid
     use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
@@ -16,6 +16,7 @@ program coriolis_driver
     real(dp), allocatable :: CAu(:, :, :), CAv(:, :, :)
 
     real(dp) :: t_start, t_end, t_total
+    integer(int64) :: total_bytes
     integer :: ni, nj, nk, niter, iter, i, j, k, scheme
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
@@ -92,6 +93,15 @@ program coriolis_driver
         end do
       end do
     end do
+
+    ! Memory usage report
+    total_bytes = G%nbytes + CS%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  coriolis_CS:      ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
 
     print '(A)', ''
     print '(A)', 'Running Coriolis solver...'

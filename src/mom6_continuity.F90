@@ -6,7 +6,7 @@
 !! Original code from: src/core/MOM_continuity_PPM.F90
 !!
 module mom6_continuity
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, BT_cont_type
     implicit none
     private
@@ -54,6 +54,7 @@ module mom6_continuity
         real(dp), allocatable :: duhdu_tot_0(:,:)  !< Sum of duhdu over k [H L] (isd:ied, jsd:jed)
         real(dp), allocatable :: uh_tot_0(:,:)     !< Sum of uh over k [H L2 T-1] (isd:ied, jsd:jed)
         real(dp), allocatable :: visc_rem_max(:,:) !< Column max of visc_rem [nondim] (isd:ied, jsd:jed)
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type continuity_CS
 
 contains
@@ -92,6 +93,10 @@ contains
         allocate(CS%duhdu_tot_0(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate(CS%uh_tot_0(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate(CS%visc_rem_max(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+
+        ! Compute total bytes: CS arrays (1 3D + 6 2D) + external arrays (2 2D + 3 3D)
+        CS%nbytes = int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) &
+            * (8_int64 + 4_int64 * int(GV%ke, int64)) * 8_int64
 
         !$acc enter data copyin(CS)
         !$acc enter data copyin(uhbt, por_face_areaU, visc_rem_u)

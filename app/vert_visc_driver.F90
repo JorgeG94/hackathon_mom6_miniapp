@@ -1,6 +1,6 @@
 !> Standalone driver for the vertical viscosity miniapp
 program vert_visc_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, RHO_0, &
                           mech_forcing_type, vertvisc_type, &
@@ -23,6 +23,7 @@ program vert_visc_driver
 
     real(dp) :: dt, t_start, t_end, t_total, t_coef, t_apply, t_remnant
     real(dp) :: t_fused, t_fused_total
+    integer(int64) :: total_bytes
     real(dp) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
     real(dp), parameter :: PI = 3.14159265358979_dp
     integer :: ni, nj, nk, niter, iter, i, j, k
@@ -124,6 +125,17 @@ program vert_visc_driver
         end do
       end do
     end do
+
+    ! Memory usage report
+    total_bytes = G%nbytes + CS%nbytes + forces%nbytes + visc%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  vert_visc_CS:     ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  mech_forcing:     ', real(forces%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  vertvisc_type:    ', real(visc%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
 
     print '(A)', ''
     print '(A)', 'Running vertical viscosity solver...'

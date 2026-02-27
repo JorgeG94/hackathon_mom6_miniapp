@@ -4,7 +4,7 @@
 !! all MOM6 mini-app modules (continuity, Coriolis, barotropic).
 !!
 module mom6_types
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     implicit none
     private
 
@@ -61,6 +61,9 @@ module mom6_types
 
         ! Direction alternation (for symmetry in split schemes)
         integer :: first_direction  ! 0 or 1, alternates each timestep
+
+        ! Memory tracking
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type ocean_grid_type
 
     !> Vertical grid structure
@@ -94,12 +97,16 @@ module mom6_types
                                        !! This is primarily used as a non-normalized weight in determining
                                        !! the depth averaged accelerations for the barotropic solver.
         ! would also have equivalent variables for meridional, but those are ignored for this example
+
+        ! Memory tracking
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type BT_cont_type
 
     !> Mechanical forcing type (wind stress)
     type :: mech_forcing_type
         real(dp), allocatable :: taux(:, :)   ! Zonal wind stress at u-points [Pa]
         real(dp), allocatable :: tauy(:, :)   ! Meridional wind stress at v-points [Pa]
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type mech_forcing_type
 
     !> Vertical viscosity input type (Rayleigh drag)
@@ -107,6 +114,7 @@ module mom6_types
         real(dp), allocatable :: Ray_u(:, :, :)  ! Rayleigh drag at u-points [H T-1 ~> m/s]
         real(dp), allocatable :: Ray_v(:, :, :)  ! Rayleigh drag at v-points [H T-1 ~> m/s]
         logical :: has_Rayleigh = .false.
+        integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type vertvisc_type
 
 contains
@@ -212,6 +220,9 @@ contains
 
         G%first_direction = 0
 
+        ! Compute total bytes: 29 2D arrays of real(dp)
+        G%nbytes = 29_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
+
         ! Copy grid to GPU
         !$acc enter data copyin(G)
         !$acc enter data copyin(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
@@ -300,6 +311,10 @@ contains
 
         allocate (BT_cont%h_u(isd:ied, jsd:jed, 1:nz), source=0._dp)
 
+        ! Compute total bytes: 6 2D + 1 3D arrays of real(dp)
+        BT_cont%nbytes = (6_int64 + int(nz, int64)) &
+            * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * 8_int64
+
         !$acc enter data copyin(BT_cont)
         !$acc enter data copyin(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
         !$acc enter data copyin(BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
@@ -338,6 +353,9 @@ contains
         allocate (forces%taux(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (forces%tauy(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
 
+        ! Compute total bytes: 2 2D arrays of real(dp)
+        forces%nbytes = 2_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
+
         !$acc enter data copyin(forces)
         !$acc enter data copyin(forces%taux, forces%tauy)
 
@@ -371,6 +389,9 @@ contains
         if (visc%has_Rayleigh) then
             allocate (visc%Ray_u(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
             allocate (visc%Ray_v(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
+            ! Compute total bytes: 2 3D arrays of real(dp)
+            visc%nbytes = 2_int64 * int(G%ied - G%isd + 1, int64) &
+                * int(G%jed - G%jsd + 1, int64) * int(nz, int64) * 8_int64
         end if
 
         !$acc enter data copyin(visc)

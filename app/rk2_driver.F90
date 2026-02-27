@@ -16,7 +16,7 @@
 !!      - Final continuity update
 !!
 program rk2_driver
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, G_EARTH, BT_cont_type, &
                           alloc_BT_cont_type, &
@@ -75,6 +75,9 @@ program rk2_driver
     real(dp), allocatable :: ubt_av(:, :), vbt_av(:, :)  ! Time-averaged BT velocities
     real(dp), allocatable :: eta_av(:, :)              ! Time-averaged SSH
     real(dp), allocatable :: du_cor(:, :)
+
+    ! Memory tracking
+    integer(int64) :: total_bytes
 
     ! Timing
     real(dp) :: dt, t_start, t_end, t_total
@@ -214,6 +217,23 @@ program rk2_driver
 
     call system_clock(init_clock_end)
     t_init = real(init_clock_end - init_clock_start, dp) / real(init_clock_rate, dp)
+
+    ! Memory usage report
+    total_bytes = G%nbytes + cont_CS%nbytes + BT_cont%nbytes + cor_CS%nbytes &
+        + bt_CS%nbytes + visc_CS%nbytes + hvisc_CS%nbytes + forces%nbytes + visc%nbytes
+    print '(A)', ''
+    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  continuity_CS:    ', real(cont_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  BT_cont_type:     ', real(BT_cont%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  coriolis_CS:      ', real(cor_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  barotropic_CS:    ', real(bt_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  vert_visc_CS:     ', real(visc_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  hor_visc_CS:      ', real(hvisc_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  mech_forcing:     ', real(forces%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A, F10.2, A)', '  vertvisc_type:    ', real(visc%nbytes, dp) / (1024.0_dp**2), ' MB'
+    print '(A)', '  ----------------------------------'
+    print '(A, F10.2, A)', '  Total:            ', real(total_bytes, dp) / (1024.0_dp**2), ' MB'
 
     print '(A)', ''
     print '(A,F12.6,A)', 'Initialization time: ', t_init, ' s'
