@@ -19,12 +19,13 @@ FC ?= gfortran
 # Directories
 SRCDIR = src
 APPDIR = app
+CUDADIR = src/cuda_kernels
 BUILDDIR = build
 
 # Compiler-specific flags (use findstring to match full paths)
 ifneq (,$(findstring nvfortran,$(FC)))
-  FFLAGS = -O4 -fast -acc=multicore,gpu -Minfo=accel
-  LDFLAGS =
+  FFLAGS = -O4 -fast -acc=multicore,gpu -Minfo=accel -gpu=mem:separate
+  LDFLAGS = -cudalib=nvtx
   MODFLAG = -module
 else ifneq (,$(findstring gfortran,$(FC)))
   # GNU Fortran
@@ -52,8 +53,16 @@ else
   MODFLAG = -J
 endif
 
+
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
+
+# CUDA kernel objects
+CUDA_MODULES = $(BUILDDIR)/mom6_coriolis_cuda.o \
+               $(BUILDDIR)/mom6_vert_visc_cuda.o \
+               $(BUILDDIR)/mom6_barotropic_cuda.o \
+               $(BUILDDIR)/mom6_hor_visc_cuda.o \
+               $(BUILDDIR)/mom6_continuity_cuda.o
 
 # Module objects
 MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
@@ -65,9 +74,16 @@ MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
 # Driver executables
 DRIVERS = continuity_driver coriolis_driver barotropic_driver vert_visc_driver hor_visc_driver rk2_driver
 
-.PHONY: all clean info run-continuity run-coriolis run-barotropic run-vert-visc run-rk2 run-all
+# CUDA compare driver executables
+COMPARE_DRIVERS = coriolis_compare_driver vert_visc_compare_driver \
+                  barotropic_compare_driver hor_visc_compare_driver \
+                  continuity_compare_driver
+
+.PHONY: all cuda clean info run-continuity run-coriolis run-barotropic run-vert-visc run-rk2 run-all
 
 all: $(BUILDDIR) $(DRIVERS)
+
+cuda: $(BUILDDIR) $(DRIVERS) $(COMPARE_DRIVERS)
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -123,11 +139,49 @@ rk2_driver: $(APPDIR)/rk2_driver.F90 $(MODULES)
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(MODULES) $(LDFLAGS)
 
 #==============================================================================
+# CUDA Fortran kernel compilation (nvfortran only, -cuda flag)
+#==============================================================================
+
+$(BUILDDIR)/mom6_coriolis_cuda.o: $(CUDADIR)/mom6_coriolis_cuda.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_vert_visc_cuda.o: $(CUDADIR)/mom6_vert_visc_cuda.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_barotropic_cuda.o: $(CUDADIR)/mom6_barotropic_cuda.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_hor_visc_cuda.o: $(CUDADIR)/mom6_hor_visc_cuda.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_continuity_cuda.o: $(CUDADIR)/mom6_continuity_cuda.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+#==============================================================================
+# CUDA compare driver compilation (link both OpenACC modules + CUDA kernels)
+#==============================================================================
+
+coriolis_compare_driver: $(APPDIR)/coriolis_compare_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o $(BUILDDIR)/mom6_coriolis_cuda.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o $(BUILDDIR)/mom6_coriolis_cuda.o $(LDFLAGS) -cuda
+
+vert_visc_compare_driver: $(APPDIR)/vert_visc_compare_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_vert_visc_cuda.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_vert_visc_cuda.o $(LDFLAGS) -cuda
+
+barotropic_compare_driver: $(APPDIR)/barotropic_compare_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_barotropic_cuda.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_barotropic_cuda.o $(LDFLAGS) -cuda
+
+hor_visc_compare_driver: $(APPDIR)/hor_visc_compare_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(BUILDDIR)/mom6_hor_visc_cuda.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(BUILDDIR)/mom6_hor_visc_cuda.o $(LDFLAGS) -cuda
+
+continuity_compare_driver: $(APPDIR)/continuity_compare_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_cuda.o
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_cuda.o $(LDFLAGS) -cuda
+
+#==============================================================================
 # Utility targets
 #==============================================================================
 
 clean:
-	rm -f $(DRIVERS) *.o *.mod
+	rm -f $(DRIVERS) $(COMPARE_DRIVERS) *.o *.mod
 	rm -rf $(BUILDDIR)
 
 info:

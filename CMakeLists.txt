@@ -16,7 +16,7 @@ endif()
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -acc -Minfo=accel")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -acc=multicore,gpu -Minfo=accel -gpu=mem:separate")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
@@ -37,6 +37,20 @@ else()
 endif()
 
 message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
+
+# =============================================================================
+# CUDA Fortran kernels (opt-in, nvfortran only)
+# =============================================================================
+
+option(ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
+
+if(ENABLE_CUDA_KERNELS)
+  if(NOT CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+    message(FATAL_ERROR "ENABLE_CUDA_KERNELS requires the NVHPC (nvfortran) compiler")
+  endif()
+  message(STATUS "CUDA Fortran kernels: ENABLED")
+  # nvfortran handles CUDA linking internally via -cuda flag, no need for find_package(CUDAToolkit)
+endif()
 
 # =============================================================================
 # Module library (shared solvers)
@@ -95,6 +109,48 @@ target_link_libraries(rk2_driver PRIVATE mom6_modules)
 target_include_directories(rk2_driver PRIVATE ${CMAKE_BINARY_DIR}/mod)
 
 # =============================================================================
+# CUDA Fortran kernel library + compare drivers (opt-in)
+# =============================================================================
+
+if(ENABLE_CUDA_KERNELS)
+  # CUDA kernels are compiled with the same base flags + -cuda appended.
+  # This matches what works in the Makefile: $(FFLAGS) -cuda ... $(LDFLAGS) -cuda
+  # Do NOT use separate isolated CUDA flags — mixing OpenACC .o with CUDA .o
+  # requires the linker to see both -acc and -cuda together.
+
+  add_library(
+    mom6_cuda_kernels STATIC
+    src/cuda_kernels/mom6_coriolis_cuda.F90
+    src/cuda_kernels/mom6_vert_visc_cuda.F90
+    src/cuda_kernels/mom6_barotropic_cuda.F90
+    src/cuda_kernels/mom6_hor_visc_cuda.F90
+    src/cuda_kernels/mom6_continuity_cuda.F90)
+
+  set_target_properties(mom6_cuda_kernels PROPERTIES Fortran_MODULE_DIRECTORY
+                                                     ${CMAKE_BINARY_DIR}/mod)
+  target_include_directories(mom6_cuda_kernels PUBLIC ${CMAKE_BINARY_DIR}/mod)
+  # Append -cuda to the base flags (inherits -O3 -acc -Minfo=accel from global)
+  # -cuda only at compile time; -acc already links the CUDA runtime
+  target_compile_options(mom6_cuda_kernels PRIVATE "-cuda")
+
+  # Helper function to create a compare driver target
+  function(add_compare_driver name source)
+    add_executable(${name} ${source})
+    target_link_libraries(${name} PRIVATE mom6_modules mom6_cuda_kernels)
+    target_include_directories(${name} PRIVATE ${CMAKE_BINARY_DIR}/mod)
+    # Compile and link with -cuda appended to the base flags
+    target_compile_options(${name} PRIVATE "-cuda")
+    target_link_options(${name} PRIVATE "-cuda" "-cudalib=nvtx")
+  endfunction()
+
+  add_compare_driver(coriolis_compare_driver app/coriolis_compare_driver.F90)
+  add_compare_driver(vert_visc_compare_driver app/vert_visc_compare_driver.F90)
+  add_compare_driver(barotropic_compare_driver app/barotropic_compare_driver.F90)
+  add_compare_driver(hor_visc_compare_driver app/hor_visc_compare_driver.F90)
+  add_compare_driver(continuity_compare_driver app/continuity_compare_driver.F90)
+endif()
+
+# =============================================================================
 # Installation
 # =============================================================================
 
@@ -121,6 +177,14 @@ add_test(NAME vert_visc_driver_small COMMAND vert_visc_driver 60 60 30 2)
 add_test(NAME hor_visc_driver_small COMMAND hor_visc_driver 60 60 30 2)
 add_test(NAME rk2_driver_small COMMAND rk2_driver 60 60 30 2 15)
 
+if(ENABLE_CUDA_KERNELS)
+  add_test(NAME coriolis_compare_small COMMAND coriolis_compare_driver 60 60 30 2)
+  add_test(NAME vert_visc_compare_small COMMAND vert_visc_compare_driver 60 60 30 2)
+  add_test(NAME barotropic_compare_small COMMAND barotropic_compare_driver 60 60 15 2)
+  add_test(NAME hor_visc_compare_small COMMAND hor_visc_compare_driver 60 60 30 2)
+  add_test(NAME continuity_compare_small COMMAND continuity_compare_driver 60 60 30 2)
+endif()
+
 # =============================================================================
 # Summary
 # =============================================================================
@@ -132,5 +196,6 @@ message(
   STATUS
     "Fortran compiler: ${CMAKE_Fortran_COMPILER_ID} (${CMAKE_Fortran_COMPILER})"
 )
+message(STATUS "CUDA kernels:     ${ENABLE_CUDA_KERNELS}")
 message(STATUS "Install prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
