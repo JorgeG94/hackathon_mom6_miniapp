@@ -90,10 +90,14 @@ program continuity_driver
     print '(A)', ''
     print '(A)', 'Running continuity solver...'
 
+    ! Put state arrays on device for OpenACC default(present) kernels
+    !$acc enter data copyin(u, hin) create(h, uh)
+
     t_total = 0.0_dp
 
     do iter = 1, niter
-        ! Reset state
+        ! Reset state (on device)
+        !$acc parallel loop collapse(3) present(h, hin)
         do k=1,nk
           do j=G%jsd,G%jed
             do i=G%isd,G%ied
@@ -108,6 +112,10 @@ program continuity_driver
 
         t_total = t_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
     end do
+
+    ! Copy results back to host
+    !$acc update self(h, uh)
+    !$acc exit data delete(u, hin, h, uh)
 
     print '(A)', ''
     print '(A)', '=================================================='

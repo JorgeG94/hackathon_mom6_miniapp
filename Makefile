@@ -24,7 +24,7 @@ BUILDDIR = build
 
 # Compiler-specific flags (use findstring to match full paths)
 ifneq (,$(findstring nvfortran,$(FC)))
-  FFLAGS = -O4 -fast -acc=multicore,gpu -Minfo=accel -gpu=mem:separate
+  FFLAGS = -O3  -acc=multicore,gpu -gpu=mem:separate 
   LDFLAGS = -cudalib=nvtx
   MODFLAG = -module
 else ifneq (,$(findstring gfortran,$(FC)))

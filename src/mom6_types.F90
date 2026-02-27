@@ -193,7 +193,8 @@ contains
                 G%IdyT(i, j) = 1.0_dp/dx_m
                 G%dxCu(i, j) = dx_m
                 G%dyCu(i, j) = dx_m
-                G%dy_Cu(i, j) = dx_m
+                ! TODO: fix this with the continuity solver
+                G%dy_Cu(i, j) = 0.0_dp !dx_m
                 G%IdxCu(i, j) = 1.0_dp/dx_m
                 G%IdyCu(i, j) = 1.0_dp/dx_m
                 G%dxCv(i, j) = dx_m
@@ -227,7 +228,7 @@ contains
         ! Copy grid to GPU
         !$acc enter data copyin(G)
         !$acc enter data copyin(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
-        !$acc enter data copyin(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu, G%dy_Cu)
+        !$acc enter data copyin(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$acc enter data copyin(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
         !$acc enter data copyin(G%IareaBu, G%areaBu, G%CoriolisBu)
         !$acc enter data copyin(G%IareaCu, G%IareaCv)

@@ -806,6 +806,7 @@ contains
                             h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
                         end if
                         duhdu_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                        !duhdu_k = (por_face_areaU(I, j, k)) * h_marg * visc_rem_val
                         uh_err_val = uh_err_val + uh_k
                         duhdu_tot_val = duhdu_tot_val + duhdu_k
                     end do
