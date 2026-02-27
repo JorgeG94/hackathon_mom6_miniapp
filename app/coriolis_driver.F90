@@ -16,7 +16,7 @@ program coriolis_driver
     real(dp), allocatable :: CAu(:, :, :), CAv(:, :, :)
 
     real(dp) :: t_start, t_end, t_total
-    integer(int64) :: total_bytes
+    integer(int64) :: total_bytes, state_bytes
     integer :: ni, nj, nk, niter, iter, i, j, k, scheme
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
@@ -95,9 +95,13 @@ program coriolis_driver
     end do
 
     ! Memory usage report
-    total_bytes = G%nbytes + CS%nbytes
+    ! Driver state arrays: 7 3D (u, v, h, uh, vh, CAu, CAv)
+    state_bytes = int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) &
+        * 7_int64 * int(nk, int64) * 8_int64
+    total_bytes = G%nbytes + CS%nbytes + state_bytes
     print '(A)', ''
-    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A)', 'GPU Memory Usage:'
+    print '(A, F10.2, A)', '  state arrays:     ', real(state_bytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  coriolis_CS:      ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A)', '  ----------------------------------'

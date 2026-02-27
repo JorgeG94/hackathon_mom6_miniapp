@@ -15,7 +15,7 @@ program continuity_driver
     real(dp), allocatable :: uh(:, :, :), uhbt(:, :), u_cor(:, :, :), du_cor(:, :)
 
     real(dp) :: dt, t_start, t_end, t_total
-    integer(int64) :: total_bytes
+    integer(int64) :: total_bytes, state_bytes
     integer :: ni, nj, nk, niter, iter, i, j, k
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg
@@ -74,9 +74,13 @@ program continuity_driver
     print *, sum(hin(G%isc:G%iec, G%jsc:G%jec, :)), sum(h(G%isc:G%iec, G%jsc:G%jec, :))
 
     ! Memory usage report
-    total_bytes = G%nbytes + CS%nbytes + BT_cont%nbytes
+    ! Driver state arrays: 4 3D (h, hin, u, uh)
+    state_bytes = int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) &
+        * 4_int64 * int(nk, int64) * 8_int64
+    total_bytes = G%nbytes + CS%nbytes + BT_cont%nbytes + state_bytes
     print '(A)', ''
-    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A)', 'GPU Memory Usage:'
+    print '(A, F10.2, A)', '  state arrays:     ', real(state_bytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  continuity_CS:    ', real(CS%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  BT_cont_type:     ', real(BT_cont%nbytes, dp) / (1024.0_dp**2), ' MB'

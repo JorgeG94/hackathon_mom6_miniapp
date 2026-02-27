@@ -77,7 +77,7 @@ program rk2_driver
     real(dp), allocatable :: du_cor(:, :)
 
     ! Memory tracking
-    integer(int64) :: total_bytes
+    integer(int64) :: total_bytes, state_bytes
 
     ! Timing
     real(dp) :: dt, t_start, t_end, t_total
@@ -219,10 +219,15 @@ program rk2_driver
     t_init = real(init_clock_end - init_clock_start, dp) / real(init_clock_rate, dp)
 
     ! Memory usage report
+    ! Driver state arrays: 13 3D + 6 2D
+    state_bytes = int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) &
+        * (13_int64 * int(nk, int64) + 6_int64) * 8_int64
     total_bytes = G%nbytes + cont_CS%nbytes + BT_cont%nbytes + cor_CS%nbytes &
-        + bt_CS%nbytes + visc_CS%nbytes + hvisc_CS%nbytes + forces%nbytes + visc%nbytes
+        + bt_CS%nbytes + visc_CS%nbytes + hvisc_CS%nbytes + forces%nbytes + visc%nbytes &
+        + state_bytes
     print '(A)', ''
-    print '(A)', 'GPU Memory Usage (derived types):'
+    print '(A)', 'GPU Memory Usage:'
+    print '(A, F10.2, A)', '  state arrays:     ', real(state_bytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  ocean_grid_type:  ', real(G%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  continuity_CS:    ', real(cont_CS%nbytes, dp) / (1024.0_dp**2), ' MB'
     print '(A, F10.2, A)', '  BT_cont_type:     ', real(BT_cont%nbytes, dp) / (1024.0_dp**2), ' MB'
