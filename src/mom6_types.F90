@@ -212,11 +212,32 @@ contains
 
         G%first_direction = 0
 
+        ! Copy grid to GPU
+        !$acc enter data copyin(G)
+        !$acc enter data copyin(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
+        !$acc enter data copyin(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
+        !$acc enter data copyin(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
+        !$acc enter data copyin(G%IareaBu, G%areaBu, G%CoriolisBu)
+        !$acc enter data copyin(G%IareaCu, G%IareaCv)
+        !$acc enter data copyin(G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
+        !$acc enter data copyin(G%bathyT)
+        !$acc enter data copyin(G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+
     end subroutine init_ocean_grid
 
     !> Deallocate grid arrays
     subroutine end_ocean_grid(G)
         type(ocean_grid_type), intent(inout) :: G
+
+        !$acc exit data delete(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
+        !$acc exit data delete(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
+        !$acc exit data delete(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
+        !$acc exit data delete(G%IareaBu, G%areaBu, G%CoriolisBu)
+        !$acc exit data delete(G%IareaCu, G%IareaCv)
+        !$acc exit data delete(G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
+        !$acc exit data delete(G%bathyT)
+        !$acc exit data delete(G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+        !$acc exit data delete(G)
 
         if (allocated(G%IareaT)) deallocate (G%IareaT)
         if (allocated(G%areaT)) deallocate (G%areaT)
@@ -257,6 +278,8 @@ contains
         GV%ke = nk
         GV%Angstrom_H = 1.0e-10_dp
 
+        !$acc enter data copyin(GV)
+
     end subroutine init_verticalGrid
 
 !> Allocates the arrays contained within a BT_cont_type and initializes them to 0.
@@ -277,6 +300,11 @@ contains
 
         allocate (BT_cont%h_u(isd:ied, jsd:jed, 1:nz), source=0._dp)
 
+        !$acc enter data copyin(BT_cont)
+        !$acc enter data copyin(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
+        !$acc enter data copyin(BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
+        !$acc enter data copyin(BT_cont%h_u)
+
     end subroutine alloc_BT_cont_type
 
 !> Deallocates the arrays contained within a BT_cont_type.
@@ -284,6 +312,11 @@ contains
         type(BT_cont_type), pointer :: BT_cont !< The BT_cont_type whose elements will be deallocated.
 
         if (.not. associated(BT_cont)) return
+
+        !$acc exit data delete(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
+        !$acc exit data delete(BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
+        !$acc exit data delete(BT_cont%h_u)
+        !$acc exit data delete(BT_cont)
 
         if (allocated(BT_cont%FA_u_WW)) deallocate (BT_cont%FA_u_WW)
         if (allocated(BT_cont%FA_u_W0)) deallocate (BT_cont%FA_u_W0)
@@ -305,11 +338,17 @@ contains
         allocate (forces%taux(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (forces%tauy(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
 
+        !$acc enter data copyin(forces)
+        !$acc enter data copyin(forces%taux, forces%tauy)
+
     end subroutine init_mech_forcing
 
     !> Deallocate mechanical forcing arrays
     subroutine end_mech_forcing(forces)
         type(mech_forcing_type), intent(inout) :: forces
+
+        !$acc exit data delete(forces%taux, forces%tauy)
+        !$acc exit data delete(forces)
 
         if (allocated(forces%taux)) deallocate (forces%taux)
         if (allocated(forces%tauy)) deallocate (forces%tauy)
@@ -334,11 +373,21 @@ contains
             allocate (visc%Ray_v(G%isd:G%ied, G%jsd:G%jed, nz), source=0.0_dp)
         end if
 
+        !$acc enter data copyin(visc)
+        if (visc%has_Rayleigh) then
+            !$acc enter data copyin(visc%Ray_u, visc%Ray_v)
+        end if
+
     end subroutine init_vertvisc_visc
 
     !> Deallocate vertvisc_type arrays
     subroutine end_vertvisc_visc(visc)
         type(vertvisc_type), intent(inout) :: visc
+
+        if (visc%has_Rayleigh) then
+            !$acc exit data delete(visc%Ray_u, visc%Ray_v)
+        end if
+        !$acc exit data delete(visc)
 
         if (allocated(visc%Ray_u)) deallocate (visc%Ray_u)
         if (allocated(visc%Ray_v)) deallocate (visc%Ray_v)

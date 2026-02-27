@@ -107,6 +107,11 @@ contains
         allocate (CS%taux_bot(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (CS%tauy_bot(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
 
+        !$acc enter data copyin(CS)
+        !$acc enter data create(CS%a_u, CS%a_v, CS%h_u, CS%h_v)
+        !$acc enter data create(CS%visc_rem_u, CS%visc_rem_v)
+        !$acc enter data create(CS%taux_bot, CS%tauy_bot)
+
         CS%initialized = .true.
 
     end subroutine vert_visc_init
@@ -116,6 +121,11 @@ contains
         type(vert_visc_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
+
+        !$acc exit data delete(CS%a_u, CS%a_v, CS%h_u, CS%h_v)
+        !$acc exit data delete(CS%visc_rem_u, CS%visc_rem_v)
+        !$acc exit data delete(CS%taux_bot, CS%tauy_bot)
+        !$acc exit data delete(CS)
 
         if (allocated(CS%a_u)) deallocate (CS%a_u)
         if (allocated(CS%a_v)) deallocate (CS%a_v)
@@ -151,7 +161,10 @@ contains
         h_neglect = GV%Angstrom_H
         I_Hbbl = 1.0_dp / (CS%Hbbl + h_neglect)
 
+        !$acc data present(G, GV, CS) copyin(u, v, h)
+
         ! --- U-points ---
+        !$acc parallel loop collapse(2) private(hvel, z_i)
         do j=js,je
         do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
@@ -223,6 +236,7 @@ contains
         end do
 
         ! --- V-points ---
+        !$acc parallel loop collapse(2) private(hvel, z_i)
         do j=js - 1,je
         do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
@@ -284,6 +298,8 @@ contains
         end do
         end do
 
+        !$acc end data
+
     end subroutine vert_visc_coef
 
     !> Compute the remnant velocity fraction after implicit viscosity
@@ -309,7 +325,10 @@ contains
         have_rayleigh = .false.
         if (present(visc)) have_rayleigh = visc%has_Rayleigh
 
+        !$acc data present(G, GV, CS)
+
         ! --- U-points ---
+        !$acc parallel loop collapse(2) private(c1)
         do j=js,je
         do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
@@ -349,6 +368,7 @@ contains
         end do
 
         ! --- V-points ---
+        !$acc parallel loop collapse(2) private(c1)
         do j=js - 1,je
         do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
@@ -384,6 +404,8 @@ contains
         end do
         end do
 
+        !$acc end data
+
     end subroutine vert_visc_remnant
 
     !> Apply vertical viscosity using Schopf & Loughe tridiagonal solver
@@ -413,7 +435,10 @@ contains
         have_rayleigh = .false.
         if (present(visc)) have_rayleigh = visc%has_Rayleigh
 
+        !$acc data present(G, GV, CS) copy(u, v) copyin(h) present(forces, visc)
+
         ! --- Apply to u-velocity ---
+        !$acc parallel loop collapse(2) private(c1)
         do j=js,je
         do i=is - 1,ie
             if (G%mask2dCu(i, j) > 0.0_dp) then
@@ -462,6 +487,7 @@ contains
         end do
 
         ! --- Apply to v-velocity ---
+        !$acc parallel loop collapse(2) private(c1)
         do j=js - 1,je
         do i=is,ie
             if (G%mask2dCv(i, j) > 0.0_dp) then
@@ -502,6 +528,8 @@ contains
             end if
         end do
         end do
+
+        !$acc end data
 
     end subroutine vert_visc_apply
 

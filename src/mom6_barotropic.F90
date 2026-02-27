@@ -133,6 +133,16 @@ contains
 
         CS%initialized = .true.
 
+        ! Copy CS structure and pre-computed arrays to GPU
+        !$acc enter data copyin(CS)
+        !$acc enter data copyin(CS%Datu, CS%Datv)
+        !$acc enter data copyin(CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
+        !$acc enter data copyin(CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
+        ! Create device-side storage for state/work arrays (overwritten in btstep)
+        !$acc enter data create(CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
+        !$acc enter data create(CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
+        !$acc enter data create(CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+
     end subroutine barotropic_init
 
     !> Finalize the barotropic solver
@@ -140,6 +150,14 @@ contains
         type(barotropic_CS), intent(inout) :: CS
 
         if (.not. CS%initialized) return
+
+        ! Remove all CS arrays from device before deallocating
+        !$acc exit data delete(CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
+        !$acc exit data delete(CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
+        !$acc exit data delete(CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
+        !$acc exit data delete(CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
+        !$acc exit data delete(CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+        !$acc exit data delete(CS)
 
         if (allocated(CS%eta)) deallocate (CS%eta)
         if (allocated(CS%eta_pred)) deallocate (CS%eta_pred)
@@ -194,7 +212,10 @@ contains
         trans_wt2 = -CS%bebt
         inv_nstep = 1.0_dp/real(CS%nstep, dp)
 
+        !$acc data copyin(eta_in, ubt_in, vbt_in) copyout(u_av, v_av, eta_av) present(CS, G)
+
         ! Initialize from input
+        !$acc parallel loop collapse(2)
         do j=G%jsd,G%jed
         do i=G%isd,G%ied
             CS%eta(i, j) = eta_in(i, j)
@@ -209,11 +230,13 @@ contains
         do n = 1, CS%nstep
 
             ! Store previous velocities
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is - 1,ie + 1
                 CS%ubt_prev(i, j) = CS%ubt(i, j)
             end do
             end do
+            !$acc parallel loop collapse(2)
             do j=js - 1,je + 1
             do i=is,ie
                 CS%vbt_prev(i, j) = CS%vbt(i, j)
@@ -221,6 +244,7 @@ contains
             end do
 
             ! Eta predictor
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie
                 CS%eta_pred(i, j) = CS%eta(i, j) + (CS%dtbt*G%IareaT(i, j))* &
@@ -230,6 +254,7 @@ contains
             end do
 
             ! Pressure force
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie - 1
                 CS%PFu(i, j) = ((CS%eta_pred(i, j)*CS%gtot_E(i, j)) - &
@@ -237,6 +262,7 @@ contains
                                CS%dgeo_de*G%IdxCu(i, j)
             end do
             end do
+            !$acc parallel loop collapse(2)
             do j=js,je - 1
             do i=is,ie
                 CS%PFv(i, j) = ((CS%eta_pred(i, j)*CS%gtot_N(i, j)) - &
@@ -259,17 +285,20 @@ contains
             end if
 
             ! Compute transports and update eta
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie - 1
                 CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
             end do
             end do
+            !$acc parallel loop collapse(2)
             do j=js,je - 1
             do i=is,ie
                 CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
             end do
             end do
 
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie
                 CS%eta(i, j) = CS%eta(i, j) - CS%dtbt*G%IareaT(i, j)* &
@@ -278,11 +307,13 @@ contains
             end do
 
             ! Accumulate time averages
+            !$acc parallel loop collapse(2)
             do j=js,je
             do i=is,ie - 1
                 CS%ubt_av(i, j) = CS%ubt_av(i, j) + CS%ubt(i, j)*inv_nstep
             end do
             end do
+            !$acc parallel loop collapse(2)
             do j=js,je - 1
             do i=is,ie
                 CS%vbt_av(i, j) = CS%vbt_av(i, j) + CS%vbt(i, j)*inv_nstep
@@ -292,6 +323,7 @@ contains
         end do  ! substep loop
 
         ! Copy output
+        !$acc parallel loop collapse(2)
         do j=G%jsd,G%jed
         do i=G%isd,G%ied
             u_av(i, j) = CS%ubt_av(i, j)
@@ -299,6 +331,8 @@ contains
             eta_av(i, j) = CS%eta(i, j)
         end do
         end do
+
+        !$acc end data
 
     end subroutine btstep
 
@@ -310,7 +344,10 @@ contains
 
         integer :: i, j
 
+        !$acc data present(CS, G)
+
         ! Coriolis for u
+        !$acc parallel loop collapse(2)
         do j=js,je
         do i=is,ie
             CS%Cor_u(i, j) = (((CS%f_4_u(4, i, j)*CS%vbt(i + 1, j)) + (CS%f_4_u(1, i, j)*CS%vbt(i, j - 1))) + &
@@ -319,12 +356,15 @@ contains
         end do
 
         ! Update u
+        !$acc parallel loop collapse(2)
         do j=js,je
         do i=is,ie
             CS%ubt(i, j) = CS%bt_rem_u(i, j)*(CS%ubt(i, j) + &
                                               CS%dtbt*(CS%Cor_u(i, j) + CS%PFu(i, j)))
         end do
         end do
+
+        !$acc end data
 
     end subroutine update_u
 
@@ -336,7 +376,10 @@ contains
 
         integer :: i, j
 
+        !$acc data present(CS, G)
+
         ! Coriolis for v
+        !$acc parallel loop collapse(2)
         do j=js,je
         do i=is,ie
             CS%Cor_v(i, j) = -1.0_dp*(((CS%f_4_v(1, i, j)*CS%ubt(i - 1, j)) + (CS%f_4_v(4, i, j)*CS%ubt(i, j + 1))) + &
@@ -345,12 +388,15 @@ contains
         end do
 
         ! Update v
+        !$acc parallel loop collapse(2)
         do j=js,je
         do i=is,ie
             CS%vbt(i, j) = CS%bt_rem_v(i, j)*(CS%vbt(i, j) + &
                                               CS%dtbt*(CS%Cor_v(i, j) + CS%PFv(i, j)))
         end do
         end do
+
+        !$acc end data
 
     end subroutine update_v
 

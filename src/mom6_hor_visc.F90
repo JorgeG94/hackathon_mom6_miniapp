@@ -281,6 +281,30 @@ contains
         CS%grad_div_mag_h = 0.0_dp; CS%grad_div_mag_q = 0.0_dp
         CS%bhstr_xx = 0.0_dp; CS%bhstr_xy = 0.0_dp; CS%Del2vort_q = 0.0_dp
 
+        !$acc enter data copyin(CS)
+        !$acc enter data copyin(CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
+        !$acc enter data copyin(CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
+        !$acc enter data copyin(CS%Laplac2_const_xx, CS%Laplac2_const_xy)
+        !$acc enter data copyin(CS%Biharm_const_xx, CS%Biharm_const_xy)
+        !$acc enter data copyin(CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+        !$acc enter data copyin(CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+        !$acc enter data copyin(CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
+        !$acc enter data copyin(CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
+        !$acc enter data copyin(CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
+        !$acc enter data copyin(CS%reduction_xx, CS%reduction_xy)
+        !$acc enter data create(CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+        !$acc enter data create(CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
+        !$acc enter data create(CS%bhstr_xx, CS%bhstr_xy)
+        !$acc enter data create(CS%h_u, CS%h_v, CS%hq)
+        !$acc enter data create(CS%Kh, CS%Ah, CS%Shear_mag)
+        !$acc enter data create(CS%Del2u, CS%Del2v)
+        !$acc enter data create(CS%hrat_min, CS%visc_bound_rem)
+        !$acc enter data create(CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
+        !$acc enter data create(CS%grad_vort_mag_h, CS%grad_vort_mag_q)
+        !$acc enter data create(CS%vert_vort_mag, CS%Del2vort_q)
+        !$acc enter data create(CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
+        !$acc enter data create(CS%grad_div_mag_h, CS%grad_div_mag_q)
+
         CS%initialized = .true.
 
     end subroutine hor_visc_init
@@ -387,6 +411,31 @@ contains
 
         if (.not. CS%initialized) return
 
+        ! Remove data from device before deallocating
+        !$acc exit data delete(CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
+        !$acc exit data delete(CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
+        !$acc exit data delete(CS%Laplac2_const_xx, CS%Laplac2_const_xy)
+        !$acc exit data delete(CS%Biharm_const_xx, CS%Biharm_const_xy)
+        !$acc exit data delete(CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+        !$acc exit data delete(CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+        !$acc exit data delete(CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
+        !$acc exit data delete(CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
+        !$acc exit data delete(CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
+        !$acc exit data delete(CS%reduction_xx, CS%reduction_xy)
+        !$acc exit data delete(CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+        !$acc exit data delete(CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
+        !$acc exit data delete(CS%bhstr_xx, CS%bhstr_xy)
+        !$acc exit data delete(CS%h_u, CS%h_v, CS%hq)
+        !$acc exit data delete(CS%Kh, CS%Ah, CS%Shear_mag)
+        !$acc exit data delete(CS%Del2u, CS%Del2v)
+        !$acc exit data delete(CS%hrat_min, CS%visc_bound_rem)
+        !$acc exit data delete(CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
+        !$acc exit data delete(CS%grad_vort_mag_h, CS%grad_vort_mag_q)
+        !$acc exit data delete(CS%vert_vort_mag, CS%Del2vort_q)
+        !$acc exit data delete(CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
+        !$acc exit data delete(CS%grad_div_mag_h, CS%grad_div_mag_q)
+        !$acc exit data delete(CS)
+
         ! Deallocate arrays
         if (allocated(CS%Kh_bg_xx)) deallocate (CS%Kh_bg_xx)
         if (allocated(CS%Kh_bg_xy)) deallocate (CS%Kh_bg_xy)
@@ -483,7 +532,10 @@ contains
         Isq = is - 1; Ieq = ie; Jsq = js - 1; Jeq = je
         h_neglect = CS%h_neglect
 
+        !$acc data present(G, GV, CS) copyin(u, v, h) copyout(diffu, diffv)
+
         ! Initialize output arrays to zero
+        !$acc parallel loop collapse(3)
         do k=1,nz
             do j=G%jsd,G%jed
                 do i=G%isd,G%ied
@@ -500,6 +552,7 @@ contains
             ! STEP 1: Calculate velocity gradients
             !=====================================================================
             ! du/dx and dv/dy at h-points (for horizontal tension)
+            !$acc parallel loop collapse(2)
             do j=Jsq,Jeq + 1
                 do i=Isq,Ieq + 1
                     CS%dudx(i, j) = CS%DY_dxT(i, j)*((G%IdyCu(i, j)*u(i, j, k)) - &
@@ -510,6 +563,7 @@ contains
             end do
 
             ! dv/dx and du/dy at q-points (for shearing strain)
+            !$acc parallel loop collapse(2)
             do J=Jsq,Jeq
                 do I=Isq,Ieq
                     CS%dvdx(I, J) = CS%DY_dxBu(I, J)*((v(i + 1, J, k)*G%IdyCv(i + 1, J)) - &
@@ -523,6 +577,7 @@ contains
             ! STEP 2: Calculate strain tensor
             !=====================================================================
             ! Horizontal tension (sh_xx) at h-points
+            !$acc parallel loop collapse(2)
             do j=Jsq,Jeq + 1
                 do i=Isq,Ieq + 1
                     CS%sh_xx(i, j) = CS%dudx(i, j) - CS%dvdy(i, j)
@@ -532,6 +587,7 @@ contains
             ! Shearing strain (sh_xy) at q-points with boundary condition branching
             if (CS%no_slip) then
                 ! No-slip: double the strain at boundaries (mask=0 means land)
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%sh_xy(I, J) = (2.0_dp - G%mask2dBu(I, J))*(CS%dvdx(I, J) + CS%dudy(I, J))
@@ -539,6 +595,7 @@ contains
                 end do
             else
                 ! Free-slip: zero strain at boundaries
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%sh_xy(I, J) = G%mask2dBu(I, J)*(CS%dvdx(I, J) + CS%dudy(I, J))
@@ -550,22 +607,26 @@ contains
             ! STEP 3: Interpolate thickness to velocity points
             !=====================================================================
             if (CS%use_land_mask) then
+                !$acc parallel loop collapse(2)
                 do j=js - 1,je + 1
                     do I=Isq,Ieq
                         CS%h_u(I, j) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i + 1, j)*h(i + 1, j, k))
                     end do
                 end do
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do i=is - 1,ie + 1
                         CS%h_v(i, J) = 0.5_dp*(G%mask2dT(i, j)*h(i, j, k) + G%mask2dT(i, j + 1)*h(i, j + 1, k))
                     end do
                 end do
             else
+                !$acc parallel loop collapse(2)
                 do j=js - 1,je + 1
                     do I=Isq,Ieq
                         CS%h_u(I, j) = 0.5_dp*(h(i, j, k) + h(i + 1, j, k))
                     end do
                 end do
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do i=is - 1,ie + 1
                         CS%h_v(i, J) = 0.5_dp*(h(i, j, k) + h(i, j + 1, k))
@@ -574,6 +635,7 @@ contains
             end if
 
             ! Thickness at q-points (average of 4 neighboring h-points)
+            !$acc parallel loop collapse(2)
             do J=Jsq,Jeq
                 do I=Isq,Ieq
                     CS%hq(I, J) = 0.25_dp*((h(i, j, k) + h(i + 1, j + 1, k)) + &
@@ -586,6 +648,7 @@ contains
             !=====================================================================
             if (CS%biharmonic) then
                 ! Del2u = x.Div(Grad u) at u-points
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do I=Isq,Ieq
                         CS%Del2u(I, j) = CS%Idx2dyCu(I, j)*((CS%dx2q(I, j)*CS%sh_xy(I, j)) - &
@@ -596,6 +659,7 @@ contains
                 end do
 
                 ! Del2v = y.Div(Grad u) at v-points
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do i=is,ie
                         CS%Del2v(i, J) = CS%Idxdy2v(i, J)*((CS%dy2q(i, J)*CS%sh_xy(i, J)) - &
@@ -611,14 +675,16 @@ contains
             !=====================================================================
             if (CS%Leith_Kh) then
 
-                ! Calculate vorticity at q-points (CPU)
+                ! Calculate vorticity at q-points
                 if (CS%no_slip) then
+                    !$acc parallel loop collapse(2)
                     do j = Jsq, Jeq
                         do I = Isq, Ieq
                             CS%vort_xy(I, J) = (2.0_dp - G%mask2dBu(I, J))*(CS%dvdx(I, J) - CS%dudy(I, J))
                         end do
                     end do
                 else
+                    !$acc parallel loop collapse(2)
                     do j = Jsq, Jeq
                         do I = Isq, Ieq
                             CS%vort_xy(I, J) = G%mask2dBu(I, J)*(CS%dvdx(I, J) - CS%dudy(I, J))
@@ -626,7 +692,8 @@ contains
                     end do
                 end if
 
-                ! Vorticity gradient at h-points (CPU, requires extended halo)
+                ! Vorticity gradient at h-points (requires extended halo)
+                !$acc parallel loop collapse(2)
                 do j = js, je
                     do i = is, ie
                         DY_dxBu_loc = G%dyBu(i, j)*G%IdxBu(i, j)
@@ -635,6 +702,7 @@ contains
                     end do
                 end do
 
+                !$acc parallel loop collapse(2)
                 do j = js, je
                     do I = Isq, Ieq
                         DX_dyBu_loc = G%dxBu(I, j)*G%IdyBu(I, j)
@@ -645,6 +713,7 @@ contains
 
                 ! Laplacian of vorticity at q-points (for Leith biharmonic)
                 if (CS%Leith_Ah) then
+                    !$acc parallel loop collapse(2)
                     do J = Jsq, Jeq
                         do I = Isq, Ieq
                             CS%Del2vort_q(I, J) = CS%DY_dxBu(I, J)* &
@@ -657,26 +726,30 @@ contains
                     end do
                 end if
 
-                ! Modified Leith: include divergence gradient (CPU)
+                ! Modified Leith: include divergence gradient
                 if (CS%modified_Leith) then
+                    !$acc parallel loop collapse(2)
                     do j = js, je
                         do i = is, ie
                             CS%div_xx(i, j) = CS%dudx(i, j) + CS%dvdy(i, j)
                         end do
                     end do
 
+                    !$acc parallel loop collapse(2)
                     do j = js, je
                         do I = Isq, Ieq
                             CS%div_xx_dx(I, j) = G%IdxCu(I, j)*(CS%div_xx(i + 1, j) - CS%div_xx(i, j))
                         end do
                     end do
 
+                    !$acc parallel loop collapse(2)
                     do J = Jsq, Jeq
                         do i = is, ie
                             CS%div_xx_dy(i, J) = G%IdyCv(i, J)*(CS%div_xx(i, j + 1) - CS%div_xx(i, j))
                         end do
                     end do
 
+                    !$acc parallel loop collapse(2)
                     do j = js, je
                         do i = is, ie
                             CS%grad_div_mag_h(i, j) = sqrt(((0.5_dp*(CS%div_xx_dx(i, j) + CS%div_xx_dx(i - 1, j)))**2) + &
@@ -684,6 +757,7 @@ contains
                         end do
                     end do
                 else
+                    !$acc parallel loop collapse(2)
                     do j = js, je
                         do i = is, ie
                             CS%grad_div_mag_h(i, j) = 0.0_dp
@@ -691,7 +765,8 @@ contains
                     end do
                 end if
 
-                ! Magnitude of vorticity gradient at h-points (CPU)
+                ! Magnitude of vorticity gradient at h-points
+                !$acc parallel loop collapse(2)
                 do j = js, je
                     do i = is, ie
                         CS%grad_vort_mag_h(i, j) = sqrt(((0.5_dp*(CS%vort_xy_dx(i, j) + CS%vort_xy_dx(i, j - 1)))**2) + &
@@ -700,7 +775,8 @@ contains
                     end do
                 end do
 
-                ! Magnitude of vorticity gradient at q-points (CPU)
+                ! Magnitude of vorticity gradient at q-points
+                !$acc parallel loop collapse(2)
                 do J = Jsq, Jeq
                     do I = Isq, Ieq
                         CS%grad_vort_mag_q(I, J) = sqrt(((0.5_dp*(CS%vort_xy_dx(i, j) + CS%vort_xy_dx(i + 1, j)))**2) + &
@@ -716,6 +792,7 @@ contains
             ! STEP 6: Compute Smagorinsky shear magnitude
             !=====================================================================
             if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do i=is,ie
                         sh_xx_sq = CS%sh_xx(i, j)**2
@@ -730,6 +807,7 @@ contains
             ! STEP 7: Compute thickness ratio for better_bound
             !=====================================================================
             if (CS%better_bound_Kh .or. CS%better_bound_Ah) then
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do i=is,ie
                         h_min = min(CS%h_u(i, j), CS%h_u(i - 1, j), CS%h_v(i, j), CS%h_v(i, j - 1))
@@ -743,6 +821,7 @@ contains
             !=====================================================================
             if (CS%Laplacian) then
                 ! Start with background viscosity
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do i=is,ie
                         CS%Kh(i, j) = CS%Kh_bg_xx(i, j)
@@ -751,6 +830,7 @@ contains
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Kh) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Kh(i, j) = max(CS%Kh(i, j), CS%Laplac2_const_xx(i, j)*CS%Shear_mag(i, j))
@@ -760,6 +840,7 @@ contains
 
                 ! Add Leith contribution
                 if (CS%Leith_Kh) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Kh(i, j) = max(CS%Kh(i, j), &
@@ -769,6 +850,7 @@ contains
                 end if
 
                 ! Apply minimum floor
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do i=is,ie
                         CS%Kh(i, j) = max(CS%Kh(i, j), CS%Kh_bg_min)
@@ -778,6 +860,7 @@ contains
                 ! Apply stability bounds
                 if (CS%better_bound_Kh .and. CS%better_bound_Ah) then
                     ! Track remaining budget for combined Kh + Ah bounding
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%visc_bound_rem(i, j) = 1.0_dp
@@ -791,12 +874,14 @@ contains
                         end do
                     end do
                 else if (CS%better_bound_Kh) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Kh(i, j) = min(CS%Kh(i, j), CS%hrat_min(i, j)*CS%Kh_Max_xx(i, j))
                         end do
                     end do
                 else if (CS%bound_Kh) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Kh(i, j) = min(CS%Kh(i, j), CS%Kh_Max_xx(i, j))
@@ -805,12 +890,14 @@ contains
                 end if
 
                 ! Compute str_xx (Laplacian contribution)
+                !$acc parallel loop collapse(2)
                 do j=Jsq,Jeq + 1
                     do i=Isq,Ieq + 1
                         CS%str_xx(i, j) = -CS%Kh(i, j)*CS%sh_xx(i, j)
                     end do
                 end do
             else
+                !$acc parallel loop collapse(2)
                 do j=Jsq,Jeq + 1
                     do i=Isq,Ieq + 1
                         CS%str_xx(i, j) = 0.0_dp
@@ -823,6 +910,7 @@ contains
             !=====================================================================
             if (CS%biharmonic) then
                 ! Start with background viscosity
+                !$acc parallel loop collapse(2)
                 do j=js,je
                     do i=is,ie
                         CS%Ah(i, j) = CS%Ah_bg_xx(i, j)
@@ -831,6 +919,7 @@ contains
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Ah) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Ah(i, j) = max(CS%Ah(i, j), CS%Biharm_const_xx(i, j)*CS%Shear_mag(i, j))
@@ -840,6 +929,7 @@ contains
 
                 ! Add Leith biharmonic contribution
                 if (CS%Leith_Ah) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             Del2vort_h = 0.25_dp*((CS%Del2vort_q(i, j) + CS%Del2vort_q(i - 1, j - 1)) + &
@@ -853,12 +943,14 @@ contains
                 if (CS%better_bound_Ah) then
                     if (CS%better_bound_Kh) then
                         ! Use remaining viscosity budget
+                        !$acc parallel loop collapse(2)
                         do j=js,je
                             do i=is,ie
                                 CS%Ah(i, j) = min(CS%Ah(i, j), CS%visc_bound_rem(i, j)*CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
                             end do
                         end do
                     else
+                        !$acc parallel loop collapse(2)
                         do j=js,je
                             do i=is,ie
                                 CS%Ah(i, j) = min(CS%Ah(i, j), CS%hrat_min(i, j)*CS%Ah_Max_xx(i, j))
@@ -866,6 +958,7 @@ contains
                         end do
                     end if
                 else if (CS%bound_Ah) then
+                    !$acc parallel loop collapse(2)
                     do j=js,je
                         do i=is,ie
                             CS%Ah(i, j) = min(CS%Ah(i, j), CS%Ah_Max_xx(i, j))
@@ -874,6 +967,7 @@ contains
                 end if
 
                 ! Add biharmonic contribution to str_xx and store bhstr_xx
+                !$acc parallel loop collapse(2)
                 do j=Jsq,Jeq + 1
                     do i=Isq,Ieq + 1
                         d_del2u = (G%IdyCu(i, j)*CS%Del2u(i, j)) - (G%IdyCu(i - 1, j)*CS%Del2u(i - 1, j))
@@ -888,6 +982,7 @@ contains
             !=====================================================================
             ! STEP 10: Multiply str_xx by thickness
             !=====================================================================
+            !$acc parallel loop collapse(2)
             do j=Jsq,Jeq + 1
                 do i=Isq,Ieq + 1
                     CS%str_xx(i, j) = CS%str_xx(i, j)*(h(i, j, k)*CS%reduction_xx(i, j))
@@ -899,6 +994,7 @@ contains
             !=====================================================================
             if (CS%Laplacian) then
                 ! Start with background viscosity
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%Kh(I, J) = CS%Kh_bg_xy(I, J)
@@ -907,6 +1003,7 @@ contains
 
                 ! Add Smagorinsky contribution (interpolate shear_mag to q-points)
                 if (CS%Smagorinsky_Kh) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
@@ -919,6 +1016,7 @@ contains
 
                 ! Add Leith contribution
                 if (CS%Leith_Kh) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%Kh(I, J) = max(CS%Kh(I, J), &
@@ -928,6 +1026,7 @@ contains
                 end if
 
                 ! Apply minimum floor
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%Kh(I, J) = max(CS%Kh(I, J), CS%Kh_bg_min)
@@ -936,6 +1035,7 @@ contains
 
                 ! Apply stability bounds at q-points
                 if (CS%better_bound_Kh) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
@@ -944,6 +1044,7 @@ contains
                         end do
                     end do
                 else if (CS%bound_Kh) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%Kh(I, J) = min(CS%Kh(I, J), CS%Kh_Max_xy(I, J))
@@ -953,12 +1054,14 @@ contains
 
                 ! Compute str_xy (Laplacian contribution)
                 if (CS%no_slip) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
                         end do
                     end do
                 else
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%str_xy(I, J) = -CS%Kh(I, J)*CS%sh_xy(I, J)
@@ -966,6 +1069,7 @@ contains
                     end do
                 end if
             else
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%str_xy(I, J) = 0.0_dp
@@ -978,6 +1082,7 @@ contains
             !=====================================================================
             if (CS%biharmonic) then
                 ! Start with background viscosity
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%Ah(I, J) = CS%Ah_bg_xy(I, J)
@@ -986,6 +1091,7 @@ contains
 
                 ! Add Smagorinsky contribution
                 if (CS%Smagorinsky_Ah) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             sh_xx_sq = 0.25_dp*((CS%sh_xx(i, j)**2 + CS%sh_xx(i + 1, j + 1)**2) + &
@@ -998,6 +1104,7 @@ contains
 
                 ! Add Leith biharmonic contribution
                 if (CS%Leith_Ah) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%Ah(I, J) = max(CS%Ah(I, J), CS%Biharm6_const_xy(I, J)*abs(CS%Del2vort_q(I, J))*inv_PI6)
@@ -1007,6 +1114,7 @@ contains
 
                 ! Apply stability bounds
                 if (CS%better_bound_Ah) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             h_min = 0.25_dp*((CS%hrat_min(i, j) + CS%hrat_min(i + 1, j + 1)) + &
@@ -1015,6 +1123,7 @@ contains
                         end do
                     end do
                 else if (CS%bound_Ah) then
+                    !$acc parallel loop collapse(2)
                     do J=Jsq,Jeq
                         do I=Isq,Ieq
                             CS%Ah(I, J) = min(CS%Ah(I, J), CS%Ah_Max_xy(I, J))
@@ -1023,6 +1132,7 @@ contains
                 end if
 
                 ! Add biharmonic contribution to str_xy and store bhstr_xy
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         d_str = CS%Ah(I, J)*((CS%DY_dxBu(I, J)*((CS%Del2v(i + 1, J)*G%IdyCv(i + 1, J)) - &
@@ -1039,12 +1149,14 @@ contains
             ! STEP 13: Multiply str_xy by thickness
             !=====================================================================
             if (CS%no_slip) then
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*CS%reduction_xy(I, J))
                     end do
                 end do
             else
+                !$acc parallel loop collapse(2)
                 do J=Jsq,Jeq
                     do I=Isq,Ieq
                         CS%str_xy(I, J) = CS%str_xy(I, J)*(CS%hq(I, J)*G%mask2dBu(I, J)*CS%reduction_xy(I, J))
@@ -1056,6 +1168,7 @@ contains
             ! STEP 14: Compute viscous accelerations
             !=====================================================================
             ! diffu = 1/h * x.Div(h * stress tensor)
+            !$acc parallel loop collapse(2)
             do j=js,je
                 do I=Isq,Ieq
                     diffu(I, j, k) = ((G%IdxCu(I, j)*((CS%dx2q(I, j - 1)*CS%str_xy(I, j - 1)) - &
@@ -1067,6 +1180,7 @@ contains
             end do
 
             ! diffv = 1/h * y.Div(h * stress tensor)
+            !$acc parallel loop collapse(2)
             do J=Jsq,Jeq
                 do i=is,ie
                     diffv(i, J, k) = ((G%IdyCv(i, J)*((CS%dy2q(i - 1, J)*CS%str_xy(i - 1, J)) - &
@@ -1081,6 +1195,7 @@ contains
             ! STEP 15: Compute friction work (after diffu/diffv)
             !=====================================================================
             if (CS%compute_FrictWork .and. present(FrictWork)) then
+                !$acc parallel loop collapse(2)
                 do j = js, je
                     do i = is, ie
                         FrictWork(i, j, k) = ( &
@@ -1105,6 +1220,8 @@ contains
             end if
 
         end do  ! k loop
+
+        !$acc end data
 
     end subroutine hor_visc
 

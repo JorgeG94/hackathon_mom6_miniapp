@@ -198,6 +198,14 @@ program rk2_driver
     ! Initialize state
     call initialize_state(u, v, h, h0, eta, ubt, vbt, G, GV)
 
+    ! Copy all state arrays to GPU for persistent residency
+    !$acc enter data copyin(u, v, h, h0, uh, vh, eta, ubt, vbt)
+    !$acc enter data create(CAu, CAv, up, vp, diffu, diffv, htmp)
+    !$acc enter data create(ubt_av, vbt_av, eta_av)
+    ! Update forces/visc data that was filled after their init (init did copyin with zeros)
+    !$acc update device(forces%taux, forces%tauy)
+    !$acc update device(visc%Ray_u, visc%Ray_v)
+
     print '(A)', ''
     print '(A)', 'Running split RK2 time-stepping...'
     print '(A)', ''
@@ -219,6 +227,7 @@ program rk2_driver
             call system_clock(iter_clock_start, iter_clock_rate)
 
             ! Reset to initial state for timing consistency
+            !$acc parallel loop collapse(3) present(h, h0)
             do k=1,nk
               do j=G%jsd,G%jed
                 do i=G%isd,G%ied
@@ -254,6 +263,7 @@ program rk2_driver
 
             ! 4. Predictor velocity update (add Coriolis + horizontal viscosity accelerations)
             call profiler_start("VelUpdate_pred")
+            !$acc parallel loop collapse(3) present(u, up, CAu, diffu)
             do k=1,nk
               do j=G%jsc,G%jec
                 do i=G%isc,G%iec - 1
@@ -261,6 +271,7 @@ program rk2_driver
                 end do
               end do
             end do
+            !$acc parallel loop collapse(3) present(v, vp, CAv, diffv)
             do k=1,nk
               do j=G%jsc,G%jec - 1
                 do i=G%isc,G%iec
@@ -287,7 +298,7 @@ program rk2_driver
             t_barotropic = t_barotropic + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Barotropic")
 
-            ! 7. Continuity (update thicknesses)
+            ! 7. Continuity (update thicknesses) — fully GPU, no memcpys
             call profiler_start("Continuity")
             call system_clock(clock_start, clock_rate)
             call continuity_PPM(up, h0, h, uh, dt, G, GV, cont_CS, por_face_areaU, uhbt, &
@@ -334,6 +345,7 @@ program rk2_driver
 
             ! 11. Final velocity update (RK2 average with Coriolis + horizontal viscosity)
             call profiler_start("VelUpdate_corr")
+            !$acc parallel loop collapse(3) present(u, CAu, diffu)
             do k=1,nk
               do j=G%jsc,G%jec
                 do i=G%isc,G%iec - 1
@@ -341,6 +353,7 @@ program rk2_driver
                 end do
               end do
             end do
+            !$acc parallel loop collapse(3) present(v, CAv, diffv)
             do k=1,nk
               do j=G%jsc,G%jec - 1
                 do i=G%isc,G%iec
@@ -370,6 +383,7 @@ program rk2_driver
             ! 14. Final continuity
             call profiler_start("Continuity")
             call system_clock(clock_start, clock_rate)
+            !$acc parallel loop collapse(3) present(h, htmp)
             do k=1,GV%ke
               do j=G%jsd,G%jed
                 do i=G%isd,G%jed
@@ -417,6 +431,9 @@ program rk2_driver
     print '(A)', '=================================================='
     call diag_report_timing(diag_CS)
 
+    ! Bring final state back to host for verification
+    !$acc update self(u, v, h, eta)
+
     ! Verify results
     call verify_state(h0, h, u, v, eta, G, GV)
 
@@ -456,6 +473,11 @@ program rk2_driver
     ! Print profiler report after all regions are recorded
     call profiler_report("RK2 Driver", root_region="Total")
     call profiler_end()
+
+    ! Release GPU memory for state arrays
+    !$acc exit data delete(u, v, h, h0, uh, vh, eta, ubt, vbt)
+    !$acc exit data delete(CAu, CAv, up, vp, diffu, diffv, htmp)
+    !$acc exit data delete(ubt_av, vbt_av, eta_av)
 
     deallocate (u, v, h, h0, uh, vh, CAu, CAv, up, vp)
     deallocate (diffu, diffv)
@@ -549,6 +571,7 @@ contains
 
         integer :: i, j, k
 
+        !$acc parallel loop collapse(3) present(u, v, h, uh, vh, G)
         do k=1,GV%ke
           do j=G%jsd,G%jed
             do i=G%isd,G%ied

@@ -71,18 +71,12 @@ contains
         end do
         end do
 
-        ! Copy derived type descriptors to GPU first, then attach members
+        ! Copy CS to GPU (G is already on GPU from init_ocean_grid)
         !$acc enter data copyin(CS)
         !$acc enter data create(CS%q, CS%KE) copyin(CS%Area_q)
         if (CS%Coriolis_Scheme /= SADOURNY75_ENERGY) then
             !$acc enter data create(CS%a, CS%b, CS%c, CS%d)
         end if
-
-        ! Copy grid descriptor to GPU, then attach metric arrays
-        !$acc enter data copyin(G)
-        !$acc enter data copyin(G%dyCv, G%dxCu, G%areaT, G%mask2dBu, &
-        !$acc&                   G%IareaBu, G%CoriolisBu, G%dyCu, G%dxCv, &
-        !$acc&                   G%IdxCu, G%IdyCv)
 
         CS%initialized = .true.
 
@@ -133,7 +127,7 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         vol_neglect = 1.0e-20_dp
 
-        !$acc data copyin(u, v, h, uh, vh) copyout(CAu, CAv)
+        !$acc data present(u, v, h, uh, vh, CAu, CAv, G, CS)
 
         ! Kernel 1: Fused PV computation (dvdx, dudy, vorticity, hArea, q)
         !$acc parallel loop collapse(3)

@@ -45,6 +45,15 @@ module mom6_continuity
                                  !! continuity solver for use as the weights in the
                                  !! barotropic solver.  Otherwise use the transport
                                  !! averaged areas.
+
+        ! GPU work arrays for fully-ported zonal_mass_flux
+        real(dp), allocatable :: duhdu(:,:,:)      !< Partial derivative of uh with u [H L] (isd:ied, jsd:jed, ke)
+        real(dp), allocatable :: du(:,:)           !< Barotropic velocity correction [L T-1] (isd:ied, jsd:jed)
+        real(dp), allocatable :: du_max_CFL(:,:)   !< Upper CFL limit on du [L T-1] (isd:ied, jsd:jed)
+        real(dp), allocatable :: du_min_CFL(:,:)   !< Lower CFL limit on du [L T-1] (isd:ied, jsd:jed)
+        real(dp), allocatable :: duhdu_tot_0(:,:)  !< Sum of duhdu over k [H L] (isd:ied, jsd:jed)
+        real(dp), allocatable :: uh_tot_0(:,:)     !< Sum of uh over k [H L2 T-1] (isd:ied, jsd:jed)
+        real(dp), allocatable :: visc_rem_max(:,:) !< Column max of visc_rem [nondim] (isd:ied, jsd:jed)
     end type continuity_CS
 
 contains
@@ -75,6 +84,21 @@ contains
         CS%use_visc_rem_max = .true.
         CS%marginal_faces = .true.
 
+        ! Allocate GPU work arrays
+        allocate(CS%duhdu(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=0.0_dp)
+        allocate(CS%du(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate(CS%du_max_CFL(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate(CS%du_min_CFL(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate(CS%duhdu_tot_0(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate(CS%uh_tot_0(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate(CS%visc_rem_max(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+
+        !$acc enter data copyin(CS)
+        !$acc enter data copyin(uhbt, por_face_areaU, visc_rem_u)
+        !$acc enter data create(u_cor, du_cor)
+        !$acc enter data create(CS%duhdu, CS%du, CS%du_max_CFL, CS%du_min_CFL)
+        !$acc enter data create(CS%duhdu_tot_0, CS%uh_tot_0, CS%visc_rem_max)
+
     end subroutine continuity_init
 
     !> Finalize the continuity solver
@@ -85,6 +109,19 @@ contains
 
         if (.not. CS%initialized) return
 
+        !$acc exit data delete(CS%duhdu, CS%du, CS%du_max_CFL, CS%du_min_CFL)
+        !$acc exit data delete(CS%duhdu_tot_0, CS%uh_tot_0, CS%visc_rem_max)
+        !$acc exit data delete(uhbt, por_face_areaU, visc_rem_u)
+        !$acc exit data delete(u_cor, du_cor)
+        !$acc exit data delete(CS)
+
+        if (allocated(CS%duhdu)) deallocate(CS%duhdu)
+        if (allocated(CS%du)) deallocate(CS%du)
+        if (allocated(CS%du_max_CFL)) deallocate(CS%du_max_CFL)
+        if (allocated(CS%du_min_CFL)) deallocate(CS%du_min_CFL)
+        if (allocated(CS%duhdu_tot_0)) deallocate(CS%duhdu_tot_0)
+        if (allocated(CS%uh_tot_0)) deallocate(CS%uh_tot_0)
+        if (allocated(CS%visc_rem_max)) deallocate(CS%visc_rem_max)
         if (allocated(uhbt)) deallocate (uhbt)
         if (allocated(u_cor)) deallocate (u_cor)
         if (allocated(du_cor)) deallocate (du_cor)
@@ -105,7 +142,7 @@ contains
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(inout) :: h  ! Final thickness [H]
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: uh  ! Zonal flux [H L2 T-1]
         real(dp), intent(in) :: dt        ! Time step [T]
-        type(continuity_CS), intent(in) :: CS
+        type(continuity_CS), intent(inout) :: CS
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in)  :: por_face_areaU !< pointers to porous barrier fractional cell metrics
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(in)    :: uhbt !< The summed volume flux through zonal faces
                                                       !! [H L2 T-1 ~> m3 s-1 or kg s-1].
@@ -134,11 +171,13 @@ contains
         je = G%jec
         nz = GV%ke
 
-        ! advect zonally
+        ! advect zonally — all GPU, zero memcpys
+        !$acc data create(h_W, h_E)
         call zonal_edge_thickness(hin, h_W, h_E, G, GV, CS)
         call zonal_mass_flux(u, hin, h_W, h_E, uh, dt, G, GV, CS, por_face_areaU, &
                              uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
         call continuity_zonal_convergence(h, uh, dt, G, GV, hin)
+        !$acc end data
 
         ! ignoring meridional direction for this example
 
@@ -164,12 +203,12 @@ contains
         h_min = 0.0_dp; if (present(hmin)) h_min = hmin
 
         if (present(hin)) then
-            !$OMP parallel do 
+            !$acc parallel loop collapse(3) default(present)
             do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
                     h(i, j, k) = max(hin(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
             end do; end do; end do
         else
-            !$OMP parallel do 
+            !$acc parallel loop collapse(3) default(present)
             do k = 1, GV%ke; do j = G%jsc, G%jec; do i = G%isc, G%iec
                     h(i, j, k) = max(h(i, j, k) - dt*G%IareaT(i, j)*(uh(I, j, k) - uh(I - 1, j, k)), h_min)
                 end do; end do; end do
@@ -199,7 +238,7 @@ contains
         nz = GV%ke
 
         if (CS%upwind_1st) then
-            !$OMP parallel do 
+            !$acc parallel loop collapse(3) default(present)
             do k = 1, nz
                 do j = jsh, jeh
                     do i = ish - 1, ieh + 1
@@ -209,299 +248,103 @@ contains
                 end do
             end do
         else
-            !$OMP parallel do 
-            do k = 1, nz
-                call PPM_reconstruction_x(h_in(:, :, k), h_W(:, :, k), h_E(:, :, k), G, &
-                                          2.0*GV%Angstrom_H, CS%monotonic, CS%simple_2nd)
-            end do
+            call PPM_reconstruction_x_3d(h_in, h_W, h_E, G, GV, &
+                                         2.0_dp*GV%Angstrom_H, CS%monotonic, CS%simple_2nd)
         end if
 
     end subroutine zonal_edge_thickness
 
 !> Calculates the mass or volume fluxes through the zonal faces, and other related quantities.
+!! Fully GPU-ported version — all computation runs on device with default(present).
     subroutine zonal_mass_flux(u, h_in, h_W, h_E, uh, dt, G, GV, CS, por_face_areaU, &
                                uhbt, visc_rem_u, u_cor, BT_cont, du_cor)
-        type(ocean_grid_type), intent(in)    :: G    !< Ocean's grid structure.
-        type(verticalGrid_type), intent(in)    :: GV   !< Ocean's vertical grid structure.
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(in)    :: u    !< Zonal velocity [L T-1 ~> m s-1].
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(in)    :: h_in !< Layer thickness used to calculate fluxes [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(in)    :: h_W !< Western edge thicknesses [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(in)    :: h_E !< Eastern edge thicknesses [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(out)   :: uh   !< Volume flux through zonal faces = u*h*dy
-                                                 !! [H L2 T-1 ~> m3 s-1 or kg s-1].
-        real(dp), intent(in)    :: dt   !< Time increment [T ~> s].
-        type(continuity_CS), intent(in)    :: CS   !< This module's control structure.
-!   type(ocean_OBC_type),    pointer       :: OBC  !< Open boundaries control structure.
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            intent(in)    :: por_face_areaU !< fractional open area of U-faces [nondim]
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), &
-            optional, intent(in)    :: uhbt !< The summed volume flux through zonal faces
-                                                 !! [H L2 T-1 ~> m3 s-1 or kg s-1].
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            optional, intent(in)    :: visc_rem_u
-        !< The fraction of zonal momentum originally in a layer that remains after a
-                     !! time-step of viscosity, and the fraction of a time-step's worth of a barotropic
-                     !! acceleration that a layer experiences after viscosity is applied [nondim].
-                     !! Visc_rem_u is between 0 (at the bottom) and 1 (far above the bottom).
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), &
-            optional, intent(out)   :: u_cor
-        !< The zonal velocities (u with a barotropic correction)
-                     !! that give uhbt as the depth-integrated transport [L T-1 ~> m s-1]
-        type(BT_cont_type), optional, pointer  :: BT_cont !< A structure with elements that describe the
-                     !! effective open face areas as a function of barotropic flow.
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), &
-            optional, intent(out)   :: du_cor !< The zonal velocity increments from u that give uhbt
-                                                 !! as the depth-integrated transports [L T-1 ~> m s-1].
+        type(ocean_grid_type), intent(in)    :: G
+        type(verticalGrid_type), intent(in)    :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h_in
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h_W
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h_E
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: uh
+        real(dp), intent(in) :: dt
+        type(continuity_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: por_face_areaU
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(in) :: uhbt
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), optional, intent(in) :: visc_rem_u
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), optional, intent(out) :: u_cor
+        type(BT_cont_type), optional, pointer :: BT_cont
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(out) :: du_cor
 
         ! Local variables
-        real(dp), dimension(G%isd:G%ied, GV%ke) :: duhdu ! Partial derivative of uh with u [H L ~> m2 or kg m-1].
-        real(dp), dimension(G%isd:G%ied) :: &
-            du, &         ! Corrective barotropic change in the velocity to give uhbt [L T-1 ~> m s-1].
-            du_min_CFL, & ! Lower limit on du correction to avoid CFL violations [L T-1 ~> m s-1]
-            du_max_CFL, & ! Upper limit on du correction to avoid CFL violations [L T-1 ~> m s-1]
-            duhdu_tot_0, & ! Summed partial derivative of uh with u [H L ~> m2 or kg m-1].
-            uh_tot_0, &   ! Summed transport with no barotropic correction [H L2 T-1 ~> m3 s-1 or kg s-1].
-            visc_rem_max  ! The column maximum of visc_rem [nondim].
-        logical, dimension(G%isd:G%ied) :: do_I
-        real(dp), dimension(G%isd:G%ied, GV%ke) :: &
-            visc_rem      ! A 2-D copy of visc_rem_u or an array of 1's [nondim].
-        real(dp), dimension(G%isd:G%ied) :: FAuI  ! A list of sums of zonal face areas [H L ~> m2 or kg m-1].
-        real(dp) :: FA_u    ! A sum of zonal face areas [H L ~> m2 or kg m-1].
-        real(dp) :: I_vrm   ! 1.0 / visc_rem_max [nondim]
-        real(dp) :: CFL_dt  ! The maximum CFL ratio of the adjusted velocities divided by
-        ! the time step [T-1 ~> s-1].
-        real(dp) :: I_dt    ! 1.0 / dt [T-1 ~> s-1].
-        real(dp) :: du_lim  ! The velocity change that give a relative CFL of 1 [L T-1 ~> m s-1].
-        real(dp) :: dx_E, dx_W ! Effective x-grid spacings to the east and west [L ~> m].
-        integer :: i, j, k, ish, ieh, jsh, jeh, n, nz
-!   integer :: l_seg ! The OBC segment number
+        real(dp) :: CFL_dt, I_dt
+        integer :: i, j, k, ish, ieh, jsh, jeh, nz
         logical :: use_visc_rem, set_BT_cont
-!   logical :: simple_OBC_pt(G%isd:G%ied)  ! Indicates points in a row with specified transport OBCs
 
         use_visc_rem = present(visc_rem_u)
-
         set_BT_cont = .false.
         if (present(BT_cont)) set_BT_cont = (associated(BT_cont))
 
-        if (present(du_cor)) du_cor(:, :) = 0.0_dp
+        ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
 
-        ish = G%isc
-        ieh = G%iec
-        jsh = G%jsc
-        jeh = G%jec
-        nz = GV%ke
-
-        CFL_dt = CS%CFL_limit_adjust/dt
-        I_dt = 1.0/dt
+        CFL_dt = CS%CFL_limit_adjust / dt
+        I_dt = 1.0_dp / dt
         if (CS%aggress_adjust) CFL_dt = I_dt
 
-        if (.not. use_visc_rem) visc_rem(:, :) = 1.0
-        do j = jsh, jeh
-            do I = ish - 1, ieh
-                do_I(I) = .true.
-            end do
-            ! Set uh and duhdu.
-            do k = 1, nz
-                if (use_visc_rem) then
-                    do I = ish - 1, ieh
-                        visc_rem(I, k) = visc_rem_u(I, j, k)
-                    end do
-                end if
-                call zonal_flux_layer(u(:, j, k), h_in(:, j, k), h_W(:, j, k), h_E(:, j, k), &
-                                      uh(:, j, k), duhdu(:, k), visc_rem(:, k), &
-                                      dt, G, j, ish, ieh, do_I, CS%vol_CFL, por_face_areaU(:, j, k))
-                ! if (local_specified_BC) then
-                !   do I=ish-1,ieh ; if (OBC%segnum_u(I,j) /= 0) then
-                !     l_seg = abs(OBC%segnum_u(I,j))
-                !     if (OBC%segment(l_seg)%specified) uh(I,j,k) = OBC%segment(l_seg)%normal_trans(I,j,k)
-                !   endif ; enddo
-                ! endif
-            end do
+        ! --- Step 2: Compute initial uh and duhdu on GPU (collapse(3)) ---
+        call zonal_flux_layer_3d(u, h_in, h_W, h_E, uh, CS, visc_rem_u, &
+                                 dt, G, GV, CS%vol_CFL, por_face_areaU, use_visc_rem)
 
-            if (present(uhbt) .or. set_BT_cont) then
-                if (use_visc_rem .and. CS%use_visc_rem_max) then
-                    visc_rem_max(:) = 0.0_dp
+        if (present(uhbt) .or. set_BT_cont) then
+            ! --- Step 3a: visc_rem_max ---
+            if (use_visc_rem .and. CS%use_visc_rem_max) then
+                !$acc parallel loop collapse(2) default(present)
+                do j = jsh, jeh
+                    do I = ish - 1, ieh
+                        CS%visc_rem_max(I, j) = 0.0_dp
+                        do k = 1, nz
+                            CS%visc_rem_max(I, j) = max(CS%visc_rem_max(I, j), visc_rem_u(I, j, k))
+                        end do
+                    end do
+                end do
+            else
+                !$acc parallel loop collapse(2) default(present)
+                do j = jsh, jeh
+                    do I = ish - 1, ieh
+                        CS%visc_rem_max(I, j) = 1.0_dp
+                    end do
+                end do
+            end if
+
+            ! --- Step 3b: uh_tot_0 + duhdu_tot_0 ---
+            !$acc parallel loop collapse(2) default(present)
+            do j = jsh, jeh
+                do I = ish - 1, ieh
+                    CS%uh_tot_0(I, j) = 0.0_dp
+                    CS%duhdu_tot_0(I, j) = 0.0_dp
                     do k = 1, nz
-                        do I = ish - 1, ieh
-                            visc_rem_max(I) = max(visc_rem_max(I), visc_rem(I, k))
-                        end do
-                    end do
-                else
-                    visc_rem_max(:) = 1.0
-                end if
-                !   Set limits on du that will keep the CFL number between -1 and 1.
-                ! This should be adequate to keep the root bracketed in all cases.
-                do I = ish - 1, ieh
-                    I_vrm = 0.0_dp
-                    if (visc_rem_max(I) > 0.0_dp) I_vrm = 1.0/visc_rem_max(I)
-                    if (CS%vol_CFL) then
-                        dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0*G%dxT(i, j))
-                        dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0*G%dxT(i + 1, j))
-                    else
-                        dx_W = G%dxT(i, j)
-                        dx_E = G%dxT(i + 1, j)
-                    end if
-                    du_max_CFL(I) = 2.0*(CFL_dt*dx_W)*I_vrm
-                    du_min_CFL(I) = -2.0*(CFL_dt*dx_E)*I_vrm
-                    uh_tot_0(I) = 0.0_dp
-                    duhdu_tot_0(I) = 0.0_dp
-                end do
-                do k = 1, nz
-                    do I = ish - 1, ieh
-                        duhdu_tot_0(I) = duhdu_tot_0(I) + duhdu(I, k)
-                        uh_tot_0(I) = uh_tot_0(I) + uh(I, j, k)
+                        CS%uh_tot_0(I, j) = CS%uh_tot_0(I, j) + uh(I, j, k)
+                        CS%duhdu_tot_0(I, j) = CS%duhdu_tot_0(I, j) + CS%duhdu(I, j, k)
                     end do
                 end do
-                if (use_visc_rem) then
-                    if (CS%aggress_adjust) then
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
+            end do
 
-                            du_lim = 0.499_dp*((dx_W*I_dt - u(I, j, k)) + MIN(0.0_dp, u(I - 1, j, k)))
-                            if (du_max_CFL(I)*visc_rem(I, k) > du_lim) &
-                                du_max_CFL(I) = du_lim/visc_rem(I, k)
+            ! --- Step 3c: CFL limits ---
+            call zonal_CFL_limits_gpu(u, CS, visc_rem_u, dt, G, GV, CFL_dt, I_dt, use_visc_rem)
 
-                            du_lim = 0.499_dp*((-dx_E*I_dt - u(I, j, k)) + MAX(0.0_dp, u(I + 1, j, k)))
-                            if (du_min_CFL(I)*visc_rem(I, k) < du_lim) &
-                                du_min_CFL(I) = du_lim/visc_rem(I, k)
-                            end do
-                        end do
-                    else
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
+            ! --- Step 4: Newton iteration (zonal_flux_adjust) on GPU ---
+            if (present(uhbt)) then
+                call zonal_flux_adjust_gpu(u, h_in, h_W, h_E, uhbt, uh, CS, &
+                                           visc_rem_u, dt, G, GV, por_face_areaU, &
+                                           use_visc_rem, u_cor, du_cor)
+            end if
 
-                            if (du_max_CFL(I)*visc_rem(I, k) > dx_W*CFL_dt - u(I, j, k)*G%mask2dCu(I, j)) &
-                                du_max_CFL(I) = (dx_W*CFL_dt - u(I, j, k))/visc_rem(I, k)
-                            if (du_min_CFL(I)*visc_rem(I, k) < -dx_E*CFL_dt - u(I, j, k)*G%mask2dCu(I, j)) &
-                                du_min_CFL(I) = -(dx_E*CFL_dt + u(I, j, k))/visc_rem(I, k)
-                            end do
-                        end do
-                    end if
-                else
-                    if (CS%aggress_adjust) then
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
+            ! --- Step 5: set_zonal_BT_cont on GPU ---
+            if (set_BT_cont) then
+                call set_zonal_BT_cont_gpu(u, h_in, h_W, h_E, BT_cont, CS, &
+                                           visc_rem_u, dt, G, GV, por_face_areaU, use_visc_rem)
+            end if
+        end if
 
-                            du_max_CFL(I) = MIN(du_max_CFL(I), 0.499_dp* &
-                                                ((dx_W*I_dt - u(I, j, k)) + MIN(0.0_dp, u(I - 1, j, k))))
-                            du_min_CFL(I) = MAX(du_min_CFL(I), 0.499_dp* &
-                                                ((-dx_E*I_dt - u(I, j, k)) + MAX(0.0_dp, u(I + 1, j, k))))
-                            end do
-                        end do
-                    else
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                            if (CS%vol_CFL) then
-                                dx_W = ratio_max(G%areaT(i, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i, j))
-                                dx_E = ratio_max(G%areaT(i + 1, j), G%dy_Cu(I, j), 1000.0_dp*G%dxT(i + 1, j))
-                            else
-                                dx_W = G%dxT(i, j)
-                                dx_E = G%dxT(i + 1, j)
-                            end if
-
-                            du_max_CFL(I) = MIN(du_max_CFL(I), dx_W*CFL_dt - u(I, j, k))
-                            du_min_CFL(I) = MAX(du_min_CFL(I), -(dx_E*CFL_dt + u(I, j, k)))
-                            end do
-                        end do
-                    end if
-                end if
-                do I = ish - 1, ieh
-                    du_max_CFL(I) = max(du_max_CFL(I), 0.0_dp)
-                    du_min_CFL(I) = min(du_min_CFL(I), 0.0_dp)
-                end do
-
-                ! any_simple_OBC = .false.
-                if (present(uhbt) .or. set_BT_cont) then
-                    !   if (local_specified_BC .or. local_Flather_OBC) then ; do I=ish-1,ieh
-                    !     l_seg = abs(OBC%segnum_u(I,j))
-
-                    !     ! Avoid reconciling barotropic/baroclinic transports if transport is specified
-                    !     simple_OBC_pt(I) = .false.
-                    !     if (l_seg /= OBC_NONE) simple_OBC_pt(I) = OBC%segment(l_seg)%specified
-                    !     do_I(I) = .not.simple_OBC_pt(I)
-                    !     any_simple_OBC = any_simple_OBC .or. simple_OBC_pt(I)
-                    !   enddo ; else ; do I=ish-1,ieh
-                    do_I(I) = .true.
-                    !   enddo ; endif
-                end if
-
-                if (present(uhbt)) then
-                    ! Find du and uh.
-                    call zonal_flux_adjust(u, h_in, h_W, h_E, uhbt(:, j), uh_tot_0, duhdu_tot_0, du, &
-                                           du_max_CFL, du_min_CFL, dt, G, GV, CS, visc_rem, &
-                                           j, ish, ieh, do_I, por_face_areaU, uh)
-
-                    if (present(u_cor)) then
-                        do k = 1, nz
-                            do I = ish - 1, ieh
-                                u_cor(I, j, k) = u(I, j, k) + du(I)*visc_rem(I, k)
-                            end do
-                            !  if (any_simple_OBC) then ; do I=ish-1,ieh ; if (simple_OBC_pt(I)) then
-                            !    u_cor(I,j,k) = OBC%segment(abs(OBC%segnum_u(I,j)))%normal_vel(I,j,k)
-                            !  endif ; enddo ; endif
-                        end do
-                    end if ! u-corrected
-
-                    if (present(du_cor)) then
-                        do I = ish - 1, ieh
-                            du_cor(I, j) = du(I)
-                        end do
-                    end if
-
-                end if
-
-                if (set_BT_cont) then
-                    call set_zonal_BT_cont(u, h_in, h_W, h_E, BT_cont, uh_tot_0, duhdu_tot_0, &
-                                           du_max_CFL, du_min_CFL, dt, G, GV, CS, visc_rem, &
-                                           visc_rem_max, j, ish, ieh, do_I, por_face_areaU)
-                    !   if (any_simple_OBC) then
-                    !     do I=ish-1,ieh
-                    !       if (simple_OBC_pt(I)) FAuI(I) = GV%H_subroundoff*G%dy_Cu(I,j)
-                    !     enddo
-                    !     ! NOTE: simple_OBC_pt(I) should prevent access to segment OBC_NONE
-                    !     do k=1,nz ; do I=ish-1,ieh ; if (simple_OBC_pt(I)) then
-                    !       l_seg = abs(OBC%segnum_u(I,j))
-                    !       if ((abs(OBC%segment(l_seg)%normal_vel(I,j,k)) > 0.0_dp) .and. (OBC%segment(l_seg)%specified)) &
-                    !         FAuI(I) = FAuI(I) + OBC%segment(l_seg)%normal_trans(I,j,k) / OBC%segment(l_seg)%normal_vel(I,j,k)
-                    !     endif ; enddo ; enddo
-                    !     do I=ish-1,ieh ; if (simple_OBC_pt(I)) then
-                    !       BT_cont%FA_u_W0(I,j) = FAuI(I) ; BT_cont%FA_u_E0(I,j) = FAuI(I)
-                    !       BT_cont%FA_u_WW(I,j) = FAuI(I) ; BT_cont%FA_u_EE(I,j) = FAuI(I)
-                    !       BT_cont%uBT_WW(I,j) = 0.0_dp ; BT_cont%uBT_EE(I,j) = 0.0_dp
-                    !     endif ; enddo
-                    !   endif
-                end if ! set_BT_cont
-
-            end if ! present(uhbt) or set_BT_cont
-
-        end do ! j-loop
-
+        ! zonal_flux_thickness is already GPU-ported
         if (set_BT_cont) then
             if (allocated(BT_cont%h_u)) then
                 if (present(u_cor)) then
@@ -516,90 +359,177 @@ contains
 
     end subroutine zonal_mass_flux
 
-!> Evaluates the zonal mass or volume fluxes in a layer.
-    subroutine zonal_flux_layer(u, h, h_W, h_E, uh, duhdu, visc_rem, dt, G, j, &
-                                ish, ieh, do_I, vol_CFL, por_face_areaU)
-        type(ocean_grid_type), intent(in)    :: G        !< Ocean's grid structure.
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: u        !< Zonal velocity [L T-1 ~> m s-1].
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: visc_rem !< Both the fraction of the
-                        !! momentum originally in a layer that remains after a time-step
-                        !! of viscosity, and the fraction of a time-step's worth of a barotropic
-                        !! acceleration that a layer experiences after viscosity is applied [nondim].
-                        !! Visc_rem is between 0 (at the bottom) and 1 (far above the bottom).
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: h        !< Layer thickness [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: h_W      !< West edge thickness [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: h_E      !< East edge thickness [H ~> m or kg m-2].
-        real(dp), dimension(G%isd:G%ied), intent(inout) :: uh       !< Zonal mass or volume
-                                                          !! transport [H L2 T-1 ~> m3 s-1 or kg s-1].
-        real(dp), dimension(G%isd:G%ied), intent(inout) :: duhdu    !< Partial derivative of uh
-                                                          !! with u [H L ~> m2 or kg m-1].
-        real(dp), intent(in)    :: dt       !< Time increment [T ~> s]
-        integer, intent(in)    :: j        !< Spatial index.
-        integer, intent(in)    :: ish      !< Start of index range.
-        integer, intent(in)    :: ieh      !< End of index range.
-        logical, dimension(G%isd:G%ied), intent(in)    :: do_I     !< Which i values to work on.
-        logical, intent(in)    :: vol_CFL  !< If true, rescale the
-        real(dp), dimension(G%isd:G%ied), intent(in)    :: por_face_areaU !< fractional open area of U-faces [nondim]
-          !! ratio of face areas to the cell areas when estimating the CFL number.
-!   type(ocean_OBC_type), optional, pointer     :: OBC !< Open boundaries control structure.
-        ! Local variables
-        real(dp) :: CFL  ! The CFL number based on the local velocity and grid spacing [nondim]
-        real(dp) :: curv_3 ! A measure of the thickness curvature over a grid length [H ~> m or kg m-2]
-        real(dp) :: h_marg ! The marginal thickness of a flux [H ~> m or kg m-2].
-        integer :: i
-!   integer :: l_seg
-!   logical :: local_open_BC
+!> GPU kernel: Compute uh and duhdu for all layers — replaces per-j zonal_flux_layer calls
+    subroutine zonal_flux_layer_3d(u, h_in, h_W, h_E, uh, CS, visc_rem_u, &
+                                   dt, G, GV, vol_CFL, por_face_areaU, use_visc_rem)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u, h_in, h_W, h_E
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: uh
+        type(continuity_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: visc_rem_u
+        real(dp), intent(in) :: dt
+        logical, intent(in) :: vol_CFL, use_visc_rem
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: por_face_areaU
 
-!   local_open_BC = .false.
-!   if (present(OBC)) then ; if (associated(OBC)) then
-!     local_open_BC = OBC%open_u_BCs_exist_globally
-!   endif ; endif
+        real(dp) :: CFL, curv_3, h_marg, visc_rem_val
+        integer :: i, j, k, ish, ieh, jsh, jeh, nz
 
-        do I = ish - 1, ieh
-            if (do_I(I)) then
-                ! Set new values of uh and duhdu.
-                if (u(I) > 0.0_dp) then
-                    if (vol_CFL) then
-                        CFL = (u(I)*dt)*(G%dy_Cu(I, j)*G%IareaT(i, j))
+        ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
+
+        !$acc parallel loop collapse(3) default(present) private(CFL, curv_3, h_marg, visc_rem_val)
+        do k = 1, nz
+            do j = jsh, jeh
+                do I = ish - 1, ieh
+                    if (use_visc_rem) then
+                        visc_rem_val = visc_rem_u(I, j, k)
                     else
-                        CFL = u(I)*dt*G%IdxT(i, j)
+                        visc_rem_val = 1.0_dp
                     end if
-                    curv_3 = (h_W(i) + h_E(i)) - 2.0*h(i)
-                    uh(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*u(I)* &
-                            (h_E(i) + CFL*(0.5*(h_W(i) - h_E(i)) + curv_3*(CFL - 1.5)))
-                    h_marg = h_E(i) + CFL*((h_W(i) - h_E(i)) + 3.0*curv_3*(CFL - 1.0))
-                elseif (u(I) < 0.0_dp) then
-                    if (vol_CFL) then
-                        CFL = (-u(I)*dt)*(G%dy_Cu(I, j)*G%IareaT(i + 1, j))
+
+                    if (u(I, j, k) > 0.0_dp) then
+                        if (vol_CFL) then
+                            CFL = (u(I, j, k) * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                        else
+                            CFL = u(I, j, k) * dt * G%IdxT(i, j)
+                        end if
+                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                        uh(I, j, k) = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u(I, j, k) * &
+                            (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    elseif (u(I, j, k) < 0.0_dp) then
+                        if (vol_CFL) then
+                            CFL = (-u(I, j, k) * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                        else
+                            CFL = -u(I, j, k) * dt * G%IdxT(i + 1, j)
+                        end if
+                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                        uh(I, j, k) = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u(I, j, k) * &
+                            (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
                     else
-                        CFL = -u(I)*dt*G%IdxT(i + 1, j)
+                        uh(I, j, k) = 0.0_dp
+                        h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
                     end if
-                    curv_3 = (h_W(i + 1) + h_E(i + 1)) - 2.0*h(i + 1)
-                    uh(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*u(I)* &
-                            (h_W(i + 1) + CFL*(0.5*(h_E(i + 1) - h_W(i + 1)) + curv_3*(CFL - 1.5)))
-                    h_marg = h_W(i + 1) + CFL*((h_E(i + 1) - h_W(i + 1)) + 3.0*curv_3*(CFL - 1.0))
-                else
-                    uh(I) = 0.0_dp
-                    h_marg = 0.5*(h_W(i + 1) + h_E(i))
-                end if
-                duhdu(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*h_marg*visc_rem(I)
-            end if
+                    CS%duhdu(I, j, k) = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                end do
+            end do
         end do
+    end subroutine zonal_flux_layer_3d
 
-!   if (local_open_BC) then
-!     do I=ish-1,ieh ; if (do_I(I)) then ; if (OBC%segnum_u(I,j) /= 0) then
-!       if (OBC%segment(abs(OBC%segnum_u(I,j)))%open) then
-!         if (OBC%segnum_u(I,j) > 0) then !  OBC_DIRECTION_E
-!           uh(I) = (G%dy_Cu(I,j) * por_face_areaU(I)) * u(I) * h(i)
-!           duhdu(I) = (G%dy_Cu(I,j) * por_face_areaU(I)) * h(i) * visc_rem(I)
-!         else !  OBC_DIRECTION_W
-!           uh(I) = (G%dy_Cu(I,j) * por_face_areaU(I)) * u(I) * h(i+1)
-!           duhdu(I) = (G%dy_Cu(I,j)* por_face_areaU(I)) * h(i+1) * visc_rem(I)
-!         endif
-!       endif
-!     endif ; endif ; enddo
-!   endif
-    end subroutine zonal_flux_layer
+!> GPU kernel: Compute CFL limits for du correction
+    subroutine zonal_CFL_limits_gpu(u, CS, visc_rem_u, dt, G, GV, CFL_dt, I_dt, use_visc_rem)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u
+        type(continuity_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: visc_rem_u
+        real(dp), intent(in) :: dt, CFL_dt, I_dt
+        logical, intent(in) :: use_visc_rem
+
+        real(dp) :: I_vrm, dx_W, dx_E, du_lim, vrm_k
+        integer :: i, j, k, ish, ieh, jsh, jeh, nz
+
+        ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
+
+        !$acc parallel loop collapse(2) default(present) &
+        !$acc   private(I_vrm, dx_W, dx_E, du_lim, vrm_k)
+        do j = jsh, jeh
+            do I = ish - 1, ieh
+                ! Initial CFL limits from visc_rem_max
+                I_vrm = 0.0_dp
+                if (CS%visc_rem_max(I, j) > 0.0_dp) I_vrm = 1.0_dp / CS%visc_rem_max(I, j)
+                if (CS%vol_CFL) then
+                    dx_W = G%areaT(i, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                    if (abs(dx_W) > 1000.0_dp * G%dxT(i, j)) dx_W = 1000.0_dp * G%dxT(i, j)
+                    dx_E = G%areaT(i + 1, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                    if (abs(dx_E) > 1000.0_dp * G%dxT(i + 1, j)) dx_E = 1000.0_dp * G%dxT(i + 1, j)
+                else
+                    dx_W = G%dxT(i, j)
+                    dx_E = G%dxT(i + 1, j)
+                end if
+                CS%du_max_CFL(I, j) = 2.0_dp * (CFL_dt * dx_W) * I_vrm
+                CS%du_min_CFL(I, j) = -2.0_dp * (CFL_dt * dx_E) * I_vrm
+
+                ! Tighten CFL limits over k
+                if (use_visc_rem) then
+                    if (CS%aggress_adjust) then
+                        do k = 1, nz
+                            vrm_k = visc_rem_u(I, j, k)
+                            if (CS%vol_CFL) then
+                                dx_W = G%areaT(i, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_W) > 1000.0_dp * G%dxT(i, j)) dx_W = 1000.0_dp * G%dxT(i, j)
+                                dx_E = G%areaT(i + 1, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_E) > 1000.0_dp * G%dxT(i + 1, j)) dx_E = 1000.0_dp * G%dxT(i + 1, j)
+                            else
+                                dx_W = G%dxT(i, j)
+                                dx_E = G%dxT(i + 1, j)
+                            end if
+                            du_lim = 0.499_dp * ((dx_W * I_dt - u(I, j, k)) + min(0.0_dp, u(I - 1, j, k)))
+                            if (CS%du_max_CFL(I, j) * vrm_k > du_lim) &
+                                CS%du_max_CFL(I, j) = du_lim / vrm_k
+                            du_lim = 0.499_dp * ((-dx_E * I_dt - u(I, j, k)) + max(0.0_dp, u(I + 1, j, k)))
+                            if (CS%du_min_CFL(I, j) * vrm_k < du_lim) &
+                                CS%du_min_CFL(I, j) = du_lim / vrm_k
+                        end do
+                    else
+                        do k = 1, nz
+                            vrm_k = visc_rem_u(I, j, k)
+                            if (CS%vol_CFL) then
+                                dx_W = G%areaT(i, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_W) > 1000.0_dp * G%dxT(i, j)) dx_W = 1000.0_dp * G%dxT(i, j)
+                                dx_E = G%areaT(i + 1, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_E) > 1000.0_dp * G%dxT(i + 1, j)) dx_E = 1000.0_dp * G%dxT(i + 1, j)
+                            else
+                                dx_W = G%dxT(i, j)
+                                dx_E = G%dxT(i + 1, j)
+                            end if
+                            if (CS%du_max_CFL(I, j) * vrm_k > dx_W * CFL_dt - u(I, j, k) * G%mask2dCu(I, j)) &
+                                CS%du_max_CFL(I, j) = (dx_W * CFL_dt - u(I, j, k)) / vrm_k
+                            if (CS%du_min_CFL(I, j) * vrm_k < -dx_E * CFL_dt - u(I, j, k) * G%mask2dCu(I, j)) &
+                                CS%du_min_CFL(I, j) = -(dx_E * CFL_dt + u(I, j, k)) / vrm_k
+                        end do
+                    end if
+                else
+                    if (CS%aggress_adjust) then
+                        do k = 1, nz
+                            if (CS%vol_CFL) then
+                                dx_W = G%areaT(i, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_W) > 1000.0_dp * G%dxT(i, j)) dx_W = 1000.0_dp * G%dxT(i, j)
+                                dx_E = G%areaT(i + 1, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_E) > 1000.0_dp * G%dxT(i + 1, j)) dx_E = 1000.0_dp * G%dxT(i + 1, j)
+                            else
+                                dx_W = G%dxT(i, j)
+                                dx_E = G%dxT(i + 1, j)
+                            end if
+                            CS%du_max_CFL(I, j) = min(CS%du_max_CFL(I, j), 0.499_dp * &
+                                ((dx_W * I_dt - u(I, j, k)) + min(0.0_dp, u(I - 1, j, k))))
+                            CS%du_min_CFL(I, j) = max(CS%du_min_CFL(I, j), 0.499_dp * &
+                                ((-dx_E * I_dt - u(I, j, k)) + max(0.0_dp, u(I + 1, j, k))))
+                        end do
+                    else
+                        do k = 1, nz
+                            if (CS%vol_CFL) then
+                                dx_W = G%areaT(i, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_W) > 1000.0_dp * G%dxT(i, j)) dx_W = 1000.0_dp * G%dxT(i, j)
+                                dx_E = G%areaT(i + 1, j) / (G%dy_Cu(I, j) + 1.0e-30_dp)
+                                if (abs(dx_E) > 1000.0_dp * G%dxT(i + 1, j)) dx_E = 1000.0_dp * G%dxT(i + 1, j)
+                            else
+                                dx_W = G%dxT(i, j)
+                                dx_E = G%dxT(i + 1, j)
+                            end if
+                            CS%du_max_CFL(I, j) = min(CS%du_max_CFL(I, j), dx_W * CFL_dt - u(I, j, k))
+                            CS%du_min_CFL(I, j) = max(CS%du_min_CFL(I, j), -(dx_E * CFL_dt + u(I, j, k)))
+                        end do
+                    end if
+                end if
+
+                ! Ensure bounds include 0
+                CS%du_max_CFL(I, j) = max(CS%du_max_CFL(I, j), 0.0_dp)
+                CS%du_min_CFL(I, j) = min(CS%du_min_CFL(I, j), 0.0_dp)
+            end do
+        end do
+    end subroutine zonal_CFL_limits_gpu
 
 !> Sets the effective interface thickness associated with the fluxes at each zonal velocity point,
 !! optionally scaling back these thicknesses to account for viscosity and fractional open areas.
@@ -645,7 +575,7 @@ contains
         jeh = G%jec
         nz = GV%ke
 
-        !$OMP parallel do private(CFL,curv_3,h_marg,h_avg)
+        !$acc parallel loop collapse(3) default(present) private(CFL,curv_3,h_marg,h_avg)
         do k = 1, nz
             do j = jsh, jeh
                 do I = ish - 1, ieh
@@ -689,7 +619,7 @@ contains
             ! Scale back the thickness to account for the effects of viscosity and the fractional open
             ! thickness to give an appropriate non-normalized weight for each layer in determining the
             ! barotropic acceleration.
-            !$OMP parallel do
+            !$acc parallel loop collapse(3) default(present)
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh
@@ -698,7 +628,7 @@ contains
                 end do
             end do
         else
-            !$OMP parallel do
+            !$acc parallel loop collapse(3) default(present)
             do k = 1, nz
                 do j = jsh, jeh
                     do I = ish - 1, ieh
@@ -741,8 +671,551 @@ contains
 
     end subroutine zonal_flux_thickness
 
-!> Returns the barotropic velocity adjustment that gives the
-!! desired barotropic (layer-summed) transport.
+!> GPU kernel: Newton iteration to adjust zonal fluxes to match barotropic transport.
+!! collapse(2) over (j, I), each thread runs independent Newton iteration.
+    subroutine zonal_flux_adjust_gpu(u, h_in, h_W, h_E, uhbt, uh, CS, &
+                                     visc_rem_u, dt, G, GV, por_face_areaU, &
+                                     use_visc_rem, u_cor, du_cor)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u, h_in, h_W, h_E
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), intent(in) :: uhbt
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(inout) :: uh
+        type(continuity_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: visc_rem_u
+        real(dp), intent(in) :: dt
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: por_face_areaU
+        logical, intent(in) :: use_visc_rem
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), optional, intent(out) :: u_cor
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(out) :: du_cor
+
+        ! Scalars for each thread (all private)
+        real(dp) :: du_val, du_prev, ddu, uh_err_val, uh_err_best_val
+        real(dp) :: duhdu_tot_val, du_max_val, du_min_val
+        real(dp) :: tol_eta, tol_vel
+        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val
+        logical :: do_more
+        integer :: i, j, k, itt, ish, ieh, jsh, jeh, nz
+        integer, parameter :: max_itts = 20
+
+        ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
+
+        !$acc parallel loop collapse(2) default(present) &
+        !$acc   private(du_val, du_prev, ddu, uh_err_val, uh_err_best_val, &
+        !$acc           duhdu_tot_val, du_max_val, du_min_val, tol_eta, tol_vel, &
+        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, do_more)
+        do j = jsh, jeh
+            do I = ish - 1, ieh
+                du_val = 0.0_dp
+                du_max_val = CS%du_max_CFL(I, j)
+                du_min_val = CS%du_min_CFL(I, j)
+                uh_err_val = CS%uh_tot_0(I, j) - uhbt(I, j)
+                duhdu_tot_val = CS%duhdu_tot_0(I, j)
+                uh_err_best_val = abs(uh_err_val)
+                do_more = .true.
+
+                do itt = 1, max_itts
+                    ! Tolerance selection
+                    if (itt <= 1) then
+                        tol_eta = 1.0e-6_dp * CS%tol_eta
+                    elseif (itt == 2) then
+                        tol_eta = 1.0e-4_dp * CS%tol_eta
+                    elseif (itt == 3) then
+                        tol_eta = 1.0e-2_dp * CS%tol_eta
+                    else
+                        tol_eta = CS%tol_eta
+                    end if
+                    tol_vel = CS%tol_vel
+
+                    ! Update bisection bounds
+                    if (uh_err_val > 0.0_dp) then
+                        du_max_val = du_val
+                    elseif (uh_err_val < 0.0_dp) then
+                        du_min_val = du_val
+                    else
+                        do_more = .false.
+                    end if
+
+                    if (do_more) then
+                        if ((dt * min(G%IareaT(i, j), G%IareaT(i + 1, j)) * abs(uh_err_val) > tol_eta) .or. &
+                            (CS%better_iter .and. ((abs(uh_err_val) > tol_vel * duhdu_tot_val) .or. &
+                                                   (abs(uh_err_val) > uh_err_best_val)))) then
+                            ! Newton step
+                            ddu = -uh_err_val / duhdu_tot_val
+                            du_prev = du_val
+                            du_val = du_val + ddu
+                            if (abs(ddu) < 1.0e-15_dp * abs(du_val)) then
+                                do_more = .false.
+                            elseif (ddu > 0.0_dp) then
+                                if (du_val >= du_max_val) then
+                                    du_val = 0.5_dp * (du_prev + du_max_val)
+                                    if (du_max_val - du_prev < 1.0e-15_dp * abs(du_val)) do_more = .false.
+                                end if
+                            else
+                                if (du_val <= du_min_val) then
+                                    du_val = 0.5_dp * (du_prev + du_min_val)
+                                    if (du_prev - du_min_val < 1.0e-15_dp * abs(du_val)) do_more = .false.
+                                end if
+                            end if
+                        else
+                            do_more = .false.
+                        end if
+                    end if
+
+                    if (.not. do_more) exit
+
+                    ! Recompute flux with adjusted velocity — sum over k
+                    uh_err_val = -uhbt(I, j)
+                    duhdu_tot_val = 0.0_dp
+                    do k = 1, nz
+                        if (use_visc_rem) then
+                            visc_rem_val = visc_rem_u(I, j, k)
+                        else
+                            visc_rem_val = 1.0_dp
+                        end if
+                        u_adj = u(I, j, k) + du_val * visc_rem_val
+
+                        ! Inline zonal_flux_layer logic
+                        if (u_adj > 0.0_dp) then
+                            if (CS%vol_CFL) then
+                                CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                            else
+                                CFL = u_adj * dt * G%IdxT(i, j)
+                            end if
+                            curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                            uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                                (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                            h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                        elseif (u_adj < 0.0_dp) then
+                            if (CS%vol_CFL) then
+                                CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                            else
+                                CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                            end if
+                            curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                            uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                                (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                            h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                        else
+                            uh_k = 0.0_dp
+                            h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
+                        end if
+                        duhdu_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                        uh_err_val = uh_err_val + uh_k
+                        duhdu_tot_val = duhdu_tot_val + duhdu_k
+                    end do
+                    uh_err_best_val = min(uh_err_best_val, abs(uh_err_val))
+                end do ! Newton iterations
+
+                ! Final pass: write converged uh values
+                do k = 1, nz
+                    if (use_visc_rem) then
+                        visc_rem_val = visc_rem_u(I, j, k)
+                    else
+                        visc_rem_val = 1.0_dp
+                    end if
+                    u_adj = u(I, j, k) + du_val * visc_rem_val
+
+                    if (u_adj > 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                        else
+                            CFL = u_adj * dt * G%IdxT(i, j)
+                        end if
+                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                        uh(I, j, k) = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                    elseif (u_adj < 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                        else
+                            CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                        end if
+                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                        uh(I, j, k) = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                    else
+                        uh(I, j, k) = 0.0_dp
+                    end if
+                end do
+
+                ! Write u_cor and du_cor
+                CS%du(I, j) = du_val
+            end do
+        end do
+
+        ! Write u_cor from converged du
+        if (present(u_cor)) then
+            !$acc parallel loop collapse(3) default(present)
+            do k = 1, nz
+                do j = jsh, jeh
+                    do I = ish - 1, ieh
+                        if (use_visc_rem) then
+                            u_cor(I, j, k) = u(I, j, k) + CS%du(I, j) * visc_rem_u(I, j, k)
+                        else
+                            u_cor(I, j, k) = u(I, j, k) + CS%du(I, j)
+                        end if
+                    end do
+                end do
+            end do
+        end if
+
+        if (present(du_cor)) then
+            !$acc parallel loop collapse(2) default(present)
+            do j = jsh, jeh
+                do I = ish - 1, ieh
+                    du_cor(I, j) = CS%du(I, j)
+                end do
+            end do
+        end if
+
+    end subroutine zonal_flux_adjust_gpu
+
+!> GPU kernel: Compute BT_cont face areas. collapse(2) over (j, I).
+    subroutine set_zonal_BT_cont_gpu(u, h_in, h_W, h_E, BT_cont, CS, &
+                                     visc_rem_u, dt, G, GV, por_face_areaU, use_visc_rem)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u, h_in, h_W, h_E
+        type(BT_cont_type), intent(inout) :: BT_cont
+        type(continuity_CS), intent(inout) :: CS
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: visc_rem_u
+        real(dp), intent(in) :: dt
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: por_face_areaU
+        logical, intent(in) :: use_visc_rem
+
+        ! Private scalars for Newton iteration + BT_cont computation
+        real(dp) :: du0_val, du_val, du_prev, ddu, uh_err_val, duhdu_tot_val
+        real(dp) :: du_max_val, du_min_val, uh_err_best_val
+        real(dp) :: tol_eta, tol_vel
+        real(dp) :: duL_val, duR_val, du_CFL_val, Idt
+        real(dp) :: visc_rem_lim, visc_rem_val
+        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k
+        real(dp) :: FAmt_L_val, FAmt_R_val, FAmt_0_val
+        real(dp) :: uhtot_L_val, uhtot_R_val
+        real(dp) :: FA_0, FA_avg
+        real(dp) :: min_visc_rem, CFL_min_val
+        logical :: do_more
+        integer :: i, j, k, itt, ish, ieh, jsh, jeh, nz
+        integer, parameter :: max_itts = 20
+
+        ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
+        Idt = 1.0_dp / dt
+        min_visc_rem = 0.1_dp
+        CFL_min_val = 1.0e-6_dp
+
+        !$acc parallel loop collapse(2) default(present) &
+        !$acc   private(du0_val, du_val, du_prev, ddu, uh_err_val, duhdu_tot_val, &
+        !$acc           du_max_val, du_min_val, uh_err_best_val, tol_eta, tol_vel, &
+        !$acc           duL_val, duR_val, du_CFL_val, visc_rem_lim, visc_rem_val, &
+        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, &
+        !$acc           FAmt_L_val, FAmt_R_val, FAmt_0_val, uhtot_L_val, uhtot_R_val, &
+        !$acc           FA_0, FA_avg, do_more)
+        do j = jsh, jeh
+            do I = ish - 1, ieh
+                ! --- First: Find du0 (zero-transport correction) via Newton ---
+                du_val = 0.0_dp
+                du_max_val = CS%du_max_CFL(I, j)
+                du_min_val = CS%du_min_CFL(I, j)
+                uh_err_val = CS%uh_tot_0(I, j) ! target is 0
+                duhdu_tot_val = CS%duhdu_tot_0(I, j)
+                uh_err_best_val = abs(uh_err_val)
+                do_more = .true.
+
+                do itt = 1, max_itts
+                    if (itt <= 1) then
+                        tol_eta = 1.0e-6_dp * CS%tol_eta
+                    elseif (itt == 2) then
+                        tol_eta = 1.0e-4_dp * CS%tol_eta
+                    elseif (itt == 3) then
+                        tol_eta = 1.0e-2_dp * CS%tol_eta
+                    else
+                        tol_eta = CS%tol_eta
+                    end if
+                    tol_vel = CS%tol_vel
+
+                    if (uh_err_val > 0.0_dp) then
+                        du_max_val = du_val
+                    elseif (uh_err_val < 0.0_dp) then
+                        du_min_val = du_val
+                    else
+                        do_more = .false.
+                    end if
+
+                    if (do_more) then
+                        if ((dt * min(G%IareaT(i, j), G%IareaT(i + 1, j)) * abs(uh_err_val) > tol_eta) .or. &
+                            (CS%better_iter .and. ((abs(uh_err_val) > tol_vel * duhdu_tot_val) .or. &
+                                                   (abs(uh_err_val) > uh_err_best_val)))) then
+                            ddu = -uh_err_val / duhdu_tot_val
+                            du_prev = du_val
+                            du_val = du_val + ddu
+                            if (abs(ddu) < 1.0e-15_dp * abs(du_val)) then
+                                do_more = .false.
+                            elseif (ddu > 0.0_dp) then
+                                if (du_val >= du_max_val) then
+                                    du_val = 0.5_dp * (du_prev + du_max_val)
+                                    if (du_max_val - du_prev < 1.0e-15_dp * abs(du_val)) do_more = .false.
+                                end if
+                            else
+                                if (du_val <= du_min_val) then
+                                    du_val = 0.5_dp * (du_prev + du_min_val)
+                                    if (du_prev - du_min_val < 1.0e-15_dp * abs(du_val)) do_more = .false.
+                                end if
+                            end if
+                        else
+                            do_more = .false.
+                        end if
+                    end if
+
+                    if (.not. do_more) exit
+
+                    uh_err_val = 0.0_dp ! target is zero transport
+                    duhdu_tot_val = 0.0_dp
+                    do k = 1, nz
+                        if (use_visc_rem) then
+                            visc_rem_val = visc_rem_u(I, j, k)
+                        else
+                            visc_rem_val = 1.0_dp
+                        end if
+                        u_adj = u(I, j, k) + du_val * visc_rem_val
+                        ! Inline flux
+                        if (u_adj > 0.0_dp) then
+                            if (CS%vol_CFL) then
+                                CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                            else
+                                CFL = u_adj * dt * G%IdxT(i, j)
+                            end if
+                            curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                            uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                                (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                            h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                        elseif (u_adj < 0.0_dp) then
+                            if (CS%vol_CFL) then
+                                CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                            else
+                                CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                            end if
+                            curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                            uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                                (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                            h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                        else
+                            uh_k = 0.0_dp
+                            h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
+                        end if
+                        duhdu_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                        uh_err_val = uh_err_val + uh_k
+                        duhdu_tot_val = duhdu_tot_val + duhdu_k
+                    end do
+                    uh_err_best_val = min(uh_err_best_val, abs(uh_err_val))
+                end do ! Newton for du0
+
+                du0_val = du_val
+
+                ! --- Determine test velocities duL, duR ---
+                du_CFL_val = (CFL_min_val * Idt) * G%dxCu(I, j)
+                duR_val = min(0.0_dp, du0_val - du_CFL_val)
+                duL_val = max(0.0_dp, du0_val + du_CFL_val)
+
+                ! Adjust duR, duL so test velocities are truly upwind
+                do k = 1, nz
+                    if (use_visc_rem) then
+                        visc_rem_val = visc_rem_u(I, j, k)
+                    else
+                        visc_rem_val = 1.0_dp
+                    end if
+                    visc_rem_lim = max(visc_rem_val, min_visc_rem * CS%visc_rem_max(I, j))
+                    if (visc_rem_lim > 0.0_dp) then
+                        if (u(I, j, k) + duR_val * visc_rem_lim > -du_CFL_val * visc_rem_val) &
+                            duR_val = -(u(I, j, k) + du_CFL_val * visc_rem_val) / visc_rem_lim
+                        if (u(I, j, k) + duL_val * visc_rem_lim < du_CFL_val * visc_rem_val) &
+                            duL_val = -(u(I, j, k) - du_CFL_val * visc_rem_val) / visc_rem_lim
+                    end if
+                end do
+
+                ! --- Evaluate fluxes at 3 test velocities (u_0, u_L, u_R) ---
+                FAmt_0_val = 0.0_dp ; FAmt_L_val = 0.0_dp ; FAmt_R_val = 0.0_dp
+                uhtot_L_val = 0.0_dp ; uhtot_R_val = 0.0_dp
+
+                do k = 1, nz
+                    if (use_visc_rem) then
+                        visc_rem_val = visc_rem_u(I, j, k)
+                    else
+                        visc_rem_val = 1.0_dp
+                    end if
+
+                    ! --- u_0 test velocity ---
+                    u_adj = u(I, j, k) + du0_val * visc_rem_val
+                    if (u_adj > 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                        else
+                            CFL = u_adj * dt * G%IdxT(i, j)
+                        end if
+                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                        h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    elseif (u_adj < 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                        else
+                            CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                        end if
+                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                        h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    else
+                        h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
+                    end if
+                    FAmt_0_val = FAmt_0_val + (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+
+                    ! --- u_L test velocity (westerly, positive) ---
+                    u_adj = u(I, j, k) + duL_val * visc_rem_val
+                    if (u_adj > 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                        else
+                            CFL = u_adj * dt * G%IdxT(i, j)
+                        end if
+                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                        uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    elseif (u_adj < 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                        else
+                            CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                        end if
+                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                        uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    else
+                        uh_k = 0.0_dp
+                        h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
+                    end if
+                    FAmt_L_val = FAmt_L_val + (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                    uhtot_L_val = uhtot_L_val + uh_k
+
+                    ! --- u_R test velocity (easterly, negative) ---
+                    u_adj = u(I, j, k) + duR_val * visc_rem_val
+                    if (u_adj > 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i, j))
+                        else
+                            CFL = u_adj * dt * G%IdxT(i, j)
+                        end if
+                        curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
+                        uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    elseif (u_adj < 0.0_dp) then
+                        if (CS%vol_CFL) then
+                            CFL = (-u_adj * dt) * (G%dy_Cu(I, j) * G%IareaT(i + 1, j))
+                        else
+                            CFL = -u_adj * dt * G%IdxT(i + 1, j)
+                        end if
+                        curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
+                        uh_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * u_adj * &
+                            (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + curv_3 * (CFL - 1.5_dp)))
+                        h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + 3.0_dp * curv_3 * (CFL - 1.0_dp))
+                    else
+                        uh_k = 0.0_dp
+                        h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
+                    end if
+                    FAmt_R_val = FAmt_R_val + (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
+                    uhtot_R_val = uhtot_R_val + uh_k
+                end do ! k
+
+                ! --- Compute BT_cont fields ---
+                ! Westerly (W0, WW)
+                FA_0 = FAmt_0_val
+                FA_avg = FAmt_0_val
+                if ((duL_val - du0_val) /= 0.0_dp) &
+                    FA_avg = uhtot_L_val / (duL_val - du0_val)
+                if (FA_avg > max(FA_0, FAmt_L_val)) then
+                    FA_avg = max(FA_0, FAmt_L_val)
+                elseif (FA_avg < min(FA_0, FAmt_L_val)) then
+                    FA_0 = FA_avg
+                end if
+                BT_cont%FA_u_W0(I, j) = FA_0
+                BT_cont%FA_u_WW(I, j) = FAmt_L_val
+                if (abs(FA_0 - FAmt_L_val) <= 1.0e-12_dp * FA_0) then
+                    BT_cont%uBT_WW(I, j) = 0.0_dp
+                else
+                    BT_cont%uBT_WW(I, j) = (1.5_dp * (duL_val - du0_val)) * &
+                        ((FAmt_L_val - FA_avg) / (FAmt_L_val - FA_0))
+                end if
+
+                ! Easterly (E0, EE)
+                FA_0 = FAmt_0_val
+                FA_avg = FAmt_0_val
+                if ((duR_val - du0_val) /= 0.0_dp) &
+                    FA_avg = uhtot_R_val / (duR_val - du0_val)
+                if (FA_avg > max(FA_0, FAmt_R_val)) then
+                    FA_avg = max(FA_0, FAmt_R_val)
+                elseif (FA_avg < min(FA_0, FAmt_R_val)) then
+                    FA_0 = FA_avg
+                end if
+                BT_cont%FA_u_E0(I, j) = FA_0
+                BT_cont%FA_u_EE(I, j) = FAmt_R_val
+                if (abs(FAmt_R_val - FA_0) <= 1.0e-12_dp * FA_0) then
+                    BT_cont%uBT_EE(I, j) = 0.0_dp
+                else
+                    BT_cont%uBT_EE(I, j) = (1.5_dp * (duR_val - du0_val)) * &
+                        ((FAmt_R_val - FA_avg) / (FAmt_R_val - FA_0))
+                end if
+            end do
+        end do
+
+    end subroutine set_zonal_BT_cont_gpu
+
+!> Evaluates the zonal mass or volume fluxes in a layer (CPU version for legacy callers).
+    subroutine zonal_flux_layer(u, h, h_W, h_E, uh, duhdu, visc_rem, dt, G, j, &
+                                ish, ieh, do_I, vol_CFL, por_face_areaU)
+        type(ocean_grid_type), intent(in) :: G
+        real(dp), dimension(G%isd:G%ied), intent(in) :: u, visc_rem, h, h_W, h_E
+        real(dp), dimension(G%isd:G%ied), intent(inout) :: uh, duhdu
+        real(dp), intent(in) :: dt
+        integer, intent(in) :: j, ish, ieh
+        logical, dimension(G%isd:G%ied), intent(in) :: do_I
+        logical, intent(in) :: vol_CFL
+        real(dp), dimension(G%isd:G%ied), intent(in) :: por_face_areaU
+
+        real(dp) :: CFL, curv_3, h_marg
+        integer :: i
+
+        do I = ish - 1, ieh
+            if (do_I(I)) then
+                if (u(I) > 0.0_dp) then
+                    if (vol_CFL) then
+                        CFL = (u(I)*dt)*(G%dy_Cu(I, j)*G%IareaT(i, j))
+                    else
+                        CFL = u(I)*dt*G%IdxT(i, j)
+                    end if
+                    curv_3 = (h_W(i) + h_E(i)) - 2.0_dp*h(i)
+                    uh(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*u(I)* &
+                            (h_E(i) + CFL*(0.5_dp*(h_W(i) - h_E(i)) + curv_3*(CFL - 1.5_dp)))
+                    h_marg = h_E(i) + CFL*((h_W(i) - h_E(i)) + 3.0_dp*curv_3*(CFL - 1.0_dp))
+                elseif (u(I) < 0.0_dp) then
+                    if (vol_CFL) then
+                        CFL = (-u(I)*dt)*(G%dy_Cu(I, j)*G%IareaT(i + 1, j))
+                    else
+                        CFL = -u(I)*dt*G%IdxT(i + 1, j)
+                    end if
+                    curv_3 = (h_W(i + 1) + h_E(i + 1)) - 2.0_dp*h(i + 1)
+                    uh(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*u(I)* &
+                            (h_W(i + 1) + CFL*(0.5_dp*(h_E(i + 1) - h_W(i + 1)) + curv_3*(CFL - 1.5_dp)))
+                    h_marg = h_W(i + 1) + CFL*((h_E(i + 1) - h_W(i + 1)) + 3.0_dp*curv_3*(CFL - 1.0_dp))
+                else
+                    uh(I) = 0.0_dp
+                    h_marg = 0.5_dp*(h_W(i + 1) + h_E(i))
+                end if
+                duhdu(I) = (G%dy_Cu(I, j)*por_face_areaU(I))*h_marg*visc_rem(I)
+            end if
+        end do
+    end subroutine zonal_flux_layer
+
+!> Returns the barotropic velocity adjustment (LEGACY CPU version - kept for continuity_driver)
     subroutine zonal_flux_adjust(u, h_in, h_W, h_E, uhbt, uh_tot_0, duhdu_tot_0, &
                                  du, du_max_CFL, du_min_CFL, dt, G, GV, CS, visc_rem, &
                                  j, ish, ieh, do_I_in, por_face_areaU, uh_3d)
@@ -1127,6 +1600,129 @@ contains
 
     end subroutine set_zonal_BT_cont
 
+!> 3D PPM reconstruction — single collapse(3) kernel instead of nz separate kernel launches.
+    subroutine PPM_reconstruction_x_3d(h_in, h_W, h_E, G, GV, h_min, monotonic, simple_2nd)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h_in
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: h_W, h_E
+        real(dp), intent(in) :: h_min
+        logical, intent(in) :: monotonic, simple_2nd
+
+        real(dp), parameter :: oneSixth = 1._dp / 6._dp
+        real(dp) :: h_ip1, h_im1, dMx, dMn, slp_im1, slp_i, slp_ip1
+        real(dp) :: h_i, RLdiff, RLdiff2, RLmean, FunFac
+        real(dp) :: curv, dh, scale_val
+        integer :: i, j, k, isl, iel, jsl, jel, nz
+
+        isl = G%isc - 1 ; iel = G%iec + 1
+        jsl = G%jsc ; jel = G%jec
+        nz = GV%ke
+
+        if (simple_2nd) then
+            !$acc parallel loop collapse(3) default(present) private(h_im1, h_ip1)
+            do k = 1, nz
+                do j = jsl, jel
+                    do i = isl, iel
+                        h_im1 = G%mask2dT(i - 1, j) * h_in(i - 1, j, k) + (1.0_dp - G%mask2dT(i - 1, j)) * h_in(i, j, k)
+                        h_ip1 = G%mask2dT(i + 1, j) * h_in(i + 1, j, k) + (1.0_dp - G%mask2dT(i + 1, j)) * h_in(i, j, k)
+                        h_W(i, j, k) = 0.5_dp * (h_im1 + h_in(i, j, k))
+                        h_E(i, j, k) = 0.5_dp * (h_ip1 + h_in(i, j, k))
+                    end do
+                end do
+            end do
+        else
+            ! Full PPM with slopes computed inline (avoids separate slp array)
+            !$acc parallel loop collapse(3) default(present) &
+            !$acc   private(h_im1, h_ip1, dMx, dMn, slp_im1, slp_i, slp_ip1)
+            do k = 1, nz
+                do j = jsl, jel
+                    do i = isl, iel
+                        ! Compute slope at i-1
+                        if ((G%mask2dT(i - 2, j) * G%mask2dT(i - 1, j) * G%mask2dT(i, j)) == 0.0_dp) then
+                            slp_im1 = 0.0_dp
+                        else
+                            slp_im1 = 0.5_dp * (h_in(i, j, k) - h_in(i - 2, j, k))
+                            dMx = max(h_in(i, j, k), h_in(i - 2, j, k), h_in(i - 1, j, k)) - h_in(i - 1, j, k)
+                            dMn = h_in(i - 1, j, k) - min(h_in(i, j, k), h_in(i - 2, j, k), h_in(i - 1, j, k))
+                            slp_im1 = sign(1._dp, slp_im1) * min(abs(slp_im1), 2._dp * min(dMx, dMn))
+                        end if
+                        ! Compute slope at i
+                        if ((G%mask2dT(i - 1, j) * G%mask2dT(i, j) * G%mask2dT(i + 1, j)) == 0.0_dp) then
+                            slp_i = 0.0_dp
+                        else
+                            slp_i = 0.5_dp * (h_in(i + 1, j, k) - h_in(i - 1, j, k))
+                            dMx = max(h_in(i + 1, j, k), h_in(i - 1, j, k), h_in(i, j, k)) - h_in(i, j, k)
+                            dMn = h_in(i, j, k) - min(h_in(i + 1, j, k), h_in(i - 1, j, k), h_in(i, j, k))
+                            slp_i = sign(1._dp, slp_i) * min(abs(slp_i), 2._dp * min(dMx, dMn))
+                        end if
+                        ! Compute slope at i+1
+                        if ((G%mask2dT(i, j) * G%mask2dT(i + 1, j) * G%mask2dT(i + 2, j)) == 0.0_dp) then
+                            slp_ip1 = 0.0_dp
+                        else
+                            slp_ip1 = 0.5_dp * (h_in(i + 2, j, k) - h_in(i, j, k))
+                            dMx = max(h_in(i + 2, j, k), h_in(i, j, k), h_in(i + 1, j, k)) - h_in(i + 1, j, k)
+                            dMn = h_in(i + 1, j, k) - min(h_in(i + 2, j, k), h_in(i, j, k), h_in(i + 1, j, k))
+                            slp_ip1 = sign(1._dp, slp_ip1) * min(abs(slp_ip1), 2._dp * min(dMx, dMn))
+                        end if
+
+                        h_im1 = G%mask2dT(i - 1, j) * h_in(i - 1, j, k) + (1.0_dp - G%mask2dT(i - 1, j)) * h_in(i, j, k)
+                        h_ip1 = G%mask2dT(i + 1, j) * h_in(i + 1, j, k) + (1.0_dp - G%mask2dT(i + 1, j)) * h_in(i, j, k)
+                        h_W(i, j, k) = 0.5_dp * (h_im1 + h_in(i, j, k)) + oneSixth * (slp_im1 - slp_i)
+                        h_E(i, j, k) = 0.5_dp * (h_ip1 + h_in(i, j, k)) + oneSixth * (slp_i - slp_ip1)
+                    end do
+                end do
+            end do
+        end if
+
+        ! Apply limiter
+        if (monotonic) then
+            !$acc parallel loop collapse(3) default(present) &
+            !$acc   private(h_i, RLdiff, RLdiff2, RLmean, FunFac)
+            do k = 1, nz
+                do j = jsl, jel
+                    do i = isl, iel
+                        h_i = h_in(i, j, k)
+                        if ((h_E(i, j, k) - h_i) * (h_i - h_W(i, j, k)) <= 0.0_dp) then
+                            h_W(i, j, k) = h_i
+                            h_E(i, j, k) = h_i
+                        else
+                            RLdiff = h_E(i, j, k) - h_W(i, j, k)
+                            RLmean = 0.5_dp * (h_E(i, j, k) + h_W(i, j, k))
+                            FunFac = 6.0_dp * RLdiff * (h_i - RLmean)
+                            RLdiff2 = RLdiff * RLdiff
+                            if (FunFac > RLdiff2) h_W(i, j, k) = 3.0_dp * h_i - 2.0_dp * h_E(i, j, k)
+                            if (FunFac < -RLdiff2) h_E(i, j, k) = 3.0_dp * h_i - 2.0_dp * h_W(i, j, k)
+                        end if
+                    end do
+                end do
+            end do
+        else
+            !$acc parallel loop collapse(3) default(present) private(curv, dh, scale_val)
+            do k = 1, nz
+                do j = jsl, jel
+                    do i = isl, iel
+                        curv = 3.0_dp * ((h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k))
+                        if (curv > 0.0_dp) then
+                            dh = h_E(i, j, k) - h_W(i, j, k)
+                            if (abs(dh) < curv) then
+                                if (h_in(i, j, k) <= h_min) then
+                                    h_W(i, j, k) = h_in(i, j, k)
+                                    h_E(i, j, k) = h_in(i, j, k)
+                                elseif (12.0_dp * curv * (h_in(i, j, k) - h_min) < (curv**2 + 3.0_dp * dh**2)) then
+                                    scale_val = 12.0_dp * curv * (h_in(i, j, k) - h_min) / (curv**2 + 3.0_dp * dh**2)
+                                    h_W(i, j, k) = h_in(i, j, k) + scale_val * (h_W(i, j, k) - h_in(i, j, k))
+                                    h_E(i, j, k) = h_in(i, j, k) + scale_val * (h_E(i, j, k) - h_in(i, j, k))
+                                end if
+                            end if
+                        end if
+                    end do
+                end do
+            end do
+        end if
+
+    end subroutine PPM_reconstruction_x_3d
+
 !> Calculates left/right edge values for PPM reconstruction.
     subroutine PPM_reconstruction_x(h_in, h_W, h_E, G, h_min, monotonic, simple_2nd)
         type(ocean_grid_type), intent(in)  :: G    !< Ocean's grid structure.
@@ -1165,6 +1761,7 @@ contains
         jel = G%jec
 
         if (simple_2nd) then
+            !$acc parallel loop collapse(2) default(present) private(h_im1, h_ip1)
             do j = jsl, jel
                 do i = isl, iel
                     h_im1 = G%mask2dT(i - 1, j)*h_in(i - 1, j) + (1.0 - G%mask2dT(i - 1, j))*h_in(i, j)
@@ -1174,6 +1771,8 @@ contains
                 end do
             end do
         else
+            !$acc data create(slp)
+            !$acc parallel loop collapse(2) default(present) private(dMx, dMn)
             do j = jsl, jel
                 do i = isl - 1, iel + 1
                     if ((G%mask2dT(i - 1, j)*G%mask2dT(i, j)*G%mask2dT(i + 1, j)) == 0.0_dp) then
@@ -1204,6 +1803,7 @@ contains
             !    enddo
             !  endif
 
+            !$acc parallel loop collapse(2) default(present) private(h_im1, h_ip1)
             do j = jsl, jel
                 do i = isl, iel
                     ! Neighboring values should take into account any boundaries.  The 3
@@ -1217,6 +1817,7 @@ contains
                     h_E(i, j) = 0.5*(h_ip1 + h_in(i, j)) + oneSixth*(slp(i, j) - slp(i + 1, j))
                 end do
             end do
+            !$acc end data
         end if
 
 ! not functional in this example, but we must be cognisant of.
@@ -1275,6 +1876,7 @@ contains
         real    :: scale ! A scaling factor to reduce the curvature of the fit               [nondim]
         integer :: i, j
 
+        !$acc parallel loop collapse(2) default(present) private(curv, dh, scale)
         do j = jis, jie
             do i = iis, iie
                 ! This limiter prevents undershooting minima within the domain with
@@ -1322,6 +1924,7 @@ contains
         real    :: FunFac   ! A curious product of the thickness slope and curvature [H2 ~> m2 or kg2 m-4]
         integer :: i, j
 
+        !$acc parallel loop collapse(2) default(present) private(h_i, RLdiff, RLdiff2, RLmean, FunFac)
         do j = jis, jie
             do i = iis, iie
                 ! This limiter monotonizes the parabola following
