@@ -28,7 +28,8 @@ program rk2_driver
                              SADOURNY75_ENERGY
     use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
     use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
-                              vert_visc_apply, vert_visc_end, vert_visc_remnant
+                              vert_visc_apply, vert_visc_end, vert_visc_remnant, &
+                              vert_visc_coef_apply
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
     use mom6_diag, only: diag_ctrl, diag_init, diag_end, register_diag_field, DIAG_STATS, &
                          post_data_3d, post_data_2d, post_product_sum_u, post_product_sum_v, &
@@ -78,8 +79,10 @@ program rk2_driver
     ! Timing
     real(dp) :: dt, t_start, t_end, t_total
     real(dp) :: t_coriolis, t_barotropic, t_continuity, t_vert_visc, t_hor_visc
-    real(dp) :: t_diag
+    real(dp) :: t_diag, t_init, t_compute
     integer :: clock_start, clock_end, clock_rate
+    integer :: init_clock_start, init_clock_end, init_clock_rate
+    integer :: compute_clock_start, compute_clock_end, compute_clock_rate
 
     ! Parameters
     integer :: ni, nj, nk, niter, bt_nsteps
@@ -132,6 +135,7 @@ program rk2_driver
     print '(A)', '=================================================='
 
     ! Initialize grids and control structures
+    call system_clock(init_clock_start, init_clock_rate)
     call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
     call init_verticalGrid(GV, nk)
     call continuity_init(cont_CS, G, GV, uhbt, u_cor, du_cor, por_face_areaU, visc_rem_u)
@@ -206,11 +210,14 @@ program rk2_driver
     !$acc update device(forces%taux, forces%tauy)
     !$acc update device(visc%Ray_u, visc%Ray_v)
 
+    call system_clock(init_clock_end)
+    t_init = real(init_clock_end - init_clock_start, dp) / real(init_clock_rate, dp)
+
+    print '(A)', ''
+    print '(A,F12.6,A)', 'Initialization time: ', t_init, ' s'
     print '(A)', ''
     print '(A)', 'Running split RK2 time-stepping...'
     print '(A)', ''
-
-    ! Initialize profiler
 
     t_total = 0.0_dp
     t_coriolis = 0.0_dp
@@ -219,6 +226,7 @@ program rk2_driver
     t_vert_visc = 0.0_dp
     t_hor_visc = 0.0_dp
     t_diag = 0.0_dp
+    call system_clock(compute_clock_start, compute_clock_rate)
     block
         real(dp) :: iter_start, iter_end
         integer :: iter_clock_start, iter_clock_end, iter_clock_rate
@@ -284,8 +292,7 @@ program rk2_driver
             ! 5. Apply vertical viscosity to predictor velocities
             call profiler_start("VertVisc")
             call system_clock(clock_start, clock_rate)
-            call vert_visc_coef(up, vp, h, visc_CS, G, GV)
-            call vert_visc_apply(up, vp, h, dt, visc_CS, G, GV, forces, visc)
+            call vert_visc_coef_apply(up, vp, h, dt, visc_CS, G, GV, forces, visc)
             call system_clock(clock_end)
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
@@ -366,8 +373,7 @@ program rk2_driver
             ! 12. Apply vertical viscosity to corrector velocities
             call profiler_start("VertVisc")
             call system_clock(clock_start, clock_rate)
-            call vert_visc_coef(u, v, h, visc_CS, G, GV)
-            call vert_visc_apply(u, v, h, 0.5_dp*dt, visc_CS, G, GV, forces, visc)
+            call vert_visc_coef_apply(u, v, h, 0.5_dp*dt, visc_CS, G, GV, forces, visc)
             call system_clock(clock_end)
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
@@ -413,21 +419,34 @@ program rk2_driver
         end do
     end block
     call profiler_stop("RK2_step")
+    call system_clock(compute_clock_end)
+    t_compute = real(compute_clock_end - compute_clock_start, dp) / real(compute_clock_rate, dp)
 
     t_total = t_coriolis + t_barotropic + t_continuity + t_vert_visc + t_hor_visc + t_diag
 
     print '(A)', '=================================================='
     print '(A)', 'Timing Results'
     print '(A)', '=================================================='
-    print '(A,F12.6)', 'Total time (s):        ', t_total
-    print '(A,F12.6)', '  Coriolis time:       ', t_coriolis
-    print '(A,F12.6)', '  Hor viscosity time:  ', t_hor_visc
-    print '(A,F12.6)', '  Vert viscosity time: ', t_vert_visc
-    print '(A,F12.6)', '  Barotropic time:     ', t_barotropic
-    print '(A,F12.6)', '  Continuity time:     ', t_continuity
-    print '(A,F12.6)', '  Diagnostics time:    ', t_diag
-    print '(A)', ''
-    print '(A,F12.6)', 'Time per RK2 step:     ', t_total/real(niter, dp)
+    print '(A,F12.6)', 'Init (alloc+GPU xfer): ', t_init
+    print '(A,F12.6)', 'Compute (wall clock):  ', t_compute
+    print '(A,F12.6)', 'Compute (sum of parts):', t_total
+    print '(A)', '--------------------------------------------------'
+    print '(A,F12.6,A,F5.1,A)', '  Coriolis:            ', t_coriolis, &
+        '  (', 100.0_dp*t_coriolis/t_total, '%)'
+    print '(A,F12.6,A,F5.1,A)', '  Hor viscosity:       ', t_hor_visc, &
+        '  (', 100.0_dp*t_hor_visc/t_total, '%)'
+    print '(A,F12.6,A,F5.1,A)', '  Vert viscosity:      ', t_vert_visc, &
+        '  (', 100.0_dp*t_vert_visc/t_total, '%)'
+    print '(A,F12.6,A,F5.1,A)', '  Barotropic:          ', t_barotropic, &
+        '  (', 100.0_dp*t_barotropic/t_total, '%)'
+    print '(A,F12.6,A,F5.1,A)', '  Continuity:          ', t_continuity, &
+        '  (', 100.0_dp*t_continuity/t_total, '%)'
+    if (t_diag > 0.0_dp) then
+        print '(A,F12.6,A,F5.1,A)', '  Diagnostics:         ', t_diag, &
+            '  (', 100.0_dp*t_diag/t_total, '%)'
+    end if
+    print '(A)', '--------------------------------------------------'
+    print '(A,F12.6)', 'Time per RK2 step:     ', t_compute/real(niter, dp)
     print '(A)', '=================================================='
     call diag_report_timing(diag_CS)
 

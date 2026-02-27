@@ -7,7 +7,8 @@ program vert_visc_driver
                           init_mech_forcing, end_mech_forcing, &
                           init_vertvisc_visc, end_vertvisc_visc
     use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, vert_visc_coef, &
-                              vert_visc_remnant, vert_visc_apply, vert_visc_end
+                              vert_visc_remnant, vert_visc_apply, vert_visc_end, &
+                              vert_visc_coef_remnant_apply
     implicit none
 
     type(ocean_grid_type) :: G
@@ -18,8 +19,10 @@ program vert_visc_driver
 
     real(dp), allocatable :: u(:, :, :), v(:, :, :), h(:, :, :)
     real(dp), allocatable :: u_init(:, :, :), v_init(:, :, :)
+    real(dp), allocatable :: u_ref(:, :, :), v_ref(:, :, :)
 
     real(dp) :: dt, t_start, t_end, t_total, t_coef, t_apply, t_remnant
+    real(dp) :: t_fused, t_fused_total
     real(dp) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
     real(dp), parameter :: PI = 3.14159265358979_dp
     integer :: ni, nj, nk, niter, iter, i, j, k
@@ -99,6 +102,8 @@ program vert_visc_driver
     allocate (h(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (u_init(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (v_init(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate (u_ref(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate (v_ref(G%isd:G%ied, G%jsd:G%jed, nk))
 
     ! Initialize state with vertical shear profile
     ! Surface-intensified flow that should be smoothed by viscosity
@@ -162,13 +167,71 @@ program vert_visc_driver
 
     print '(A)', ''
     print '(A)', '=================================================='
-    print '(A)', 'Timing Results'
+    print '(A)', 'Unfused Timing Results'
     print '(A)', '=================================================='
     print '(A,F12.6)', 'Total time (s):          ', t_total
     print '(A,F12.6)', '  Coefficient time:      ', t_coef
     print '(A,F12.6)', '  Remnant time:          ', t_remnant
     print '(A,F12.6)', '  Apply time:            ', t_apply
     print '(A,F12.6)', 'Time per iteration:      ', t_total / real(niter, dp)
+    print '(A)', '=================================================='
+
+    ! Save unfused results as reference
+    do k=1,nk
+      do j=G%jsd,G%jed
+        do i=G%isd,G%ied
+        u_ref(i, j, k) = u(i, j, k)
+        v_ref(i, j, k) = v(i, j, k)
+        end do
+      end do
+    end do
+
+    ! =================================================================
+    ! Fused benchmark: coef + remnant + apply in one kernel
+    ! =================================================================
+    print '(A)', ''
+    print '(A)', 'Running FUSED vertical viscosity solver...'
+
+    t_fused_total = 0.0_dp
+
+    do iter = 1, niter
+        ! Reset velocities each iteration
+        do k=1,nk
+          do j=G%jsd,G%jed
+            do i=G%isd,G%ied
+            u(i, j, k) = u_init(i, j, k)
+            v(i, j, k) = v_init(i, j, k)
+            end do
+          end do
+        end do
+
+        call system_clock(clock_start, clock_rate)
+        call vert_visc_coef_remnant_apply(u, v, h, dt, CS, G, GV, forces, visc)
+        call system_clock(clock_end)
+        t_fused_total = t_fused_total + real(clock_end - clock_start, dp) / real(clock_rate, dp)
+    end do
+
+    print '(A)', ''
+    print '(A)', '=================================================='
+    print '(A)', 'Fused Timing Results'
+    print '(A)', '=================================================='
+    print '(A,F12.6)', 'Fused total time (s):    ', t_fused_total
+    print '(A,F12.6)', 'Fused time per iter:     ', t_fused_total / real(niter, dp)
+    print '(A)', '=================================================='
+
+    ! Compare fused vs unfused results
+    call compare_results(u_ref, v_ref, u, v, G, GV)
+
+    ! Summary
+    print '(A)', ''
+    print '(A)', '=================================================='
+    print '(A)', 'Performance Comparison'
+    print '(A)', '=================================================='
+    print '(A,F12.6)', 'Unfused time/iter (s):   ', t_total / real(niter, dp)
+    print '(A,F12.6)', 'Fused time/iter (s):     ', t_fused_total / real(niter, dp)
+    if (t_fused_total > 0.0_dp) then
+        print '(A,F12.2,A)', 'Speedup:                 ', t_total / t_fused_total, 'x'
+    end if
     print '(A)', '=================================================='
 
     ! Verify that viscosity reduced shear
@@ -185,7 +248,7 @@ program vert_visc_driver
     call end_mech_forcing(forces)
     call end_vertvisc_visc(visc)
     call end_ocean_grid(G)
-    deallocate (u, v, h, u_init, v_init)
+    deallocate (u, v, h, u_init, v_init, u_ref, v_ref)
 
 contains
 
@@ -335,5 +398,62 @@ contains
         print '(A,ES12.5,A,ES12.5)', '  tauy_bot: min = ', tauy_min, '  max = ', tauy_max
 
     end subroutine report_bottom_stress
+
+    subroutine compare_results(u_ref, v_ref, u_fused, v_fused, G, GV)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u_ref, v_ref
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u_fused, v_fused
+
+        real(dp) :: max_u_err, max_v_err, max_u_rel, max_v_rel
+        real(dp) :: diff, ref_val
+        integer :: i, j, k
+
+        max_u_err = 0.0_dp; max_v_err = 0.0_dp
+        max_u_rel = 0.0_dp; max_v_rel = 0.0_dp
+
+        do k = 1, GV%ke
+            do j = G%jsc, G%jec
+                do i = G%isc - 1, G%iec
+                    diff = abs(u_fused(i, j, k) - u_ref(i, j, k))
+                    max_u_err = max(max_u_err, diff)
+                    ref_val = abs(u_ref(i, j, k))
+                    if (ref_val > 1.0e-30_dp) then
+                        max_u_rel = max(max_u_rel, diff / ref_val)
+                    end if
+                end do
+            end do
+        end do
+
+        do k = 1, GV%ke
+            do j = G%jsc - 1, G%jec
+                do i = G%isc, G%iec
+                    diff = abs(v_fused(i, j, k) - v_ref(i, j, k))
+                    max_v_err = max(max_v_err, diff)
+                    ref_val = abs(v_ref(i, j, k))
+                    if (ref_val > 1.0e-30_dp) then
+                        max_v_rel = max(max_v_rel, diff / ref_val)
+                    end if
+                end do
+            end do
+        end do
+
+        print '(A)', ''
+        print '(A)', 'Fused vs Unfused Comparison:'
+        print '(A)', '--------------------------------------------------'
+        print '(A,ES15.8)', '  Max |u_fused - u_ref|:     ', max_u_err
+        print '(A,ES15.8)', '  Max |v_fused - v_ref|:     ', max_v_err
+        print '(A,ES15.8)', '  Max rel error (u):         ', max_u_rel
+        print '(A,ES15.8)', '  Max rel error (v):         ', max_v_rel
+
+        if (max_u_rel < 1.0e-14_dp .and. max_v_rel < 1.0e-14_dp) then
+            print '(A)', '  Status: PASS (bit-identical or < 1e-14 relative error)'
+        else if (max_u_rel < 1.0e-10_dp .and. max_v_rel < 1.0e-10_dp) then
+            print '(A)', '  Status: ACCEPTABLE (< 1e-10 relative error)'
+        else
+            print '(A)', '  Status: WARNING (significant difference detected)'
+        end if
+
+    end subroutine compare_results
 
 end program vert_visc_driver
