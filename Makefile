@@ -24,7 +24,8 @@ BUILDDIR = build
 
 # Compiler-specific flags (use findstring to match full paths)
 ifneq (,$(findstring nvfortran,$(FC)))
-  FFLAGS = -O3  -acc=multicore,gpu -gpu=mem:separate 
+  FFLAGS = -O3  -acc=multicore,gpu -gpu=mem:separate
+  FFLAGS_CONTINUITY = -O1 -acc=multicore,gpu -gpu=mem:separate
   LDFLAGS = -cudalib=nvtx
   MODFLAG = -module
 else ifneq (,$(findstring gfortran,$(FC)))
@@ -53,6 +54,8 @@ else
   MODFLAG = -J
 endif
 
+# Default FFLAGS_CONTINUITY to FFLAGS for compilers without the bug
+FFLAGS_CONTINUITY ?= $(FFLAGS)
 
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
@@ -98,8 +101,9 @@ $(BUILDDIR)/mom6_types.o: $(SRCDIR)/mom6_types.F90 | $(BUILDDIR)
 $(BUILDDIR)/mom6_profiler.o: $(SRCDIR)/mom6_profiler.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
+# Use -O1 for continuity to work around nvfortran >=O2 codegen bug in complex OpenACC kernels
 $(BUILDDIR)/mom6_continuity.o: $(SRCDIR)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+	$(FC) $(FFLAGS_CONTINUITY) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 $(BUILDDIR)/mom6_coriolis.o: $(SRCDIR)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)

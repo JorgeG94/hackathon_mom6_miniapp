@@ -419,7 +419,7 @@ program rk2_driver
             !$acc parallel loop collapse(3) present(h, htmp)
             do k=1,GV%ke
               do j=G%jsd,G%jed
-                do i=G%isd,G%jed
+                do i=G%isd,G%ied
                 htmp(i, j, k) = h(i, j, k)
                 end do
               end do

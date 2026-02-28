@@ -67,14 +67,15 @@ contains
         real(dp), dimension(:, :), intent(inout), allocatable:: uhbt, du_cor
         real(dp), dimension(:, :, :), intent(inout), allocatable:: u_cor, por_face_areaU, visc_rem_u
 
-        allocate (uhbt(G%isd:G%ied, G%jsd:G%jed))
-        allocate (u_cor(G%isd:G%ied, G%jsd:G%jed, GV%ke))
-        allocate (du_cor(G%isd:G%ied, G%jsd:G%jed))
+        allocate (uhbt(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
+        allocate (u_cor(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=0.0_dp)
+        allocate (du_cor(G%isd:G%ied, G%jsd:G%jed), source=0.0_dp)
         allocate (por_face_areaU(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
         allocate (visc_rem_u(G%isd:G%ied, G%jsd:G%jed, GV%ke), source=1._dp)
 
         CS%initialized = .true.
         CS%upwind_1st = .false.
+        CS%monotonic = .false.
         CS%simple_2nd = .false.
         CS%tol_eta = 1.d-12
         CS%tol_vel = 3.d8
@@ -283,6 +284,14 @@ contains
         real(dp) :: CFL_dt, I_dt
         integer :: i, j, k, ish, ieh, jsh, jeh, nz
         logical :: use_visc_rem, set_BT_cont
+        ! Newton iteration locals (for inlined zonal_flux_adjust)
+        real(dp) :: du_val, du_prev, ddu, uh_err_val, uh_err_best_val
+        real(dp) :: duhdu_tot_val, du_max_val, du_min_val
+        real(dp) :: tol_eta_n, tol_vel_n
+        real(dp) :: CFL_n, curv_3_n, h_marg_n, u_adj_n, uh_k_n, duhdu_k_n, visc_rem_val_n
+        logical :: do_more
+        integer :: itt
+        integer, parameter :: max_itts = 20
 
         use_visc_rem = present(visc_rem_u)
         set_BT_cont = .false.
@@ -335,11 +344,35 @@ contains
             ! --- Step 3c: CFL limits ---
             call zonal_CFL_limits_gpu(u, CS, visc_rem_u, dt, G, GV, CFL_dt, I_dt, use_visc_rem)
 
-            ! --- Step 4: Newton iteration (zonal_flux_adjust) on GPU ---
+            ! --- Step 4: Newton iteration (call subroutine with non-optional args to avoid nvfortran bug) ---
             if (present(uhbt)) then
                 call zonal_flux_adjust_gpu(u, h_in, h_W, h_E, uhbt, uh, CS, &
-                                           visc_rem_u, dt, G, GV, por_face_areaU, &
-                                           use_visc_rem, u_cor, du_cor)
+                                           visc_rem_u, dt, G, GV, por_face_areaU, use_visc_rem)
+                ! Write u_cor and du_cor from converged CS%du (explicit present to avoid optional arg bug)
+                if (present(u_cor)) then
+                    !$acc parallel loop collapse(3) &
+                    !$acc   present(u_cor, u, visc_rem_u, CS, CS%du)
+                    do k = 1, nz
+                        do j = jsh, jeh
+                            do I = ish - 1, ieh
+                                if (use_visc_rem) then
+                                    u_cor(I, j, k) = u(I, j, k) + CS%du(I, j) * visc_rem_u(I, j, k)
+                                else
+                                    u_cor(I, j, k) = u(I, j, k) + CS%du(I, j)
+                                end if
+                            end do
+                        end do
+                    end do
+                end if
+                if (present(du_cor)) then
+                    !$acc parallel loop collapse(2) &
+                    !$acc   present(du_cor, CS, CS%du)
+                    do j = jsh, jeh
+                        do I = ish - 1, ieh
+                            du_cor(I, j) = CS%du(I, j)
+                        end do
+                    end do
+                end if
             end if
 
             ! --- Step 5: set_zonal_BT_cont on GPU ---
@@ -680,7 +713,7 @@ contains
 !! collapse(2) over (j, I), each thread runs independent Newton iteration.
     subroutine zonal_flux_adjust_gpu(u, h_in, h_W, h_E, uhbt, uh, CS, &
                                      visc_rem_u, dt, G, GV, por_face_areaU, &
-                                     use_visc_rem, u_cor, du_cor)
+                                     use_visc_rem)
         type(ocean_grid_type), intent(in) :: G
         type(verticalGrid_type), intent(in) :: GV
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u, h_in, h_W, h_E
@@ -691,8 +724,6 @@ contains
         real(dp), intent(in) :: dt
         real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: por_face_areaU
         logical, intent(in) :: use_visc_rem
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), optional, intent(out) :: u_cor
-        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), optional, intent(out) :: du_cor
 
         ! Scalars for each thread (all private)
         real(dp) :: du_val, du_prev, ddu, uh_err_val, uh_err_best_val
@@ -705,10 +736,14 @@ contains
 
         ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
 
-        !$acc parallel loop collapse(2) default(present) &
+        !$acc parallel loop collapse(2) &
+        !$acc   present(u, h_in, h_W, h_E, uhbt, uh, visc_rem_u, por_face_areaU) &
+        !$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0) &
+        !$acc   present(CS%du, G, G%IareaT, G%dy_Cu, G%IdxT) &
         !$acc   private(du_val, du_prev, ddu, uh_err_val, uh_err_best_val, &
         !$acc           duhdu_tot_val, du_max_val, du_min_val, tol_eta, tol_vel, &
-        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, do_more)
+        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, do_more, &
+        !$acc           k, itt)
         do j = jsh, jeh
             do I = ish - 1, ieh
                 du_val = 0.0_dp
@@ -806,7 +841,6 @@ contains
                             h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
                         end if
                         duhdu_k = (G%dy_Cu(I, j) * por_face_areaU(I, j, k)) * h_marg * visc_rem_val
-                        !duhdu_k = (por_face_areaU(I, j, k)) * h_marg * visc_rem_val
                         uh_err_val = uh_err_val + uh_k
                         duhdu_tot_val = duhdu_tot_val + duhdu_k
                     end do
@@ -850,31 +884,6 @@ contains
             end do
         end do
 
-        ! Write u_cor from converged du
-        if (present(u_cor)) then
-            !$acc parallel loop collapse(3) default(present)
-            do k = 1, nz
-                do j = jsh, jeh
-                    do I = ish - 1, ieh
-                        if (use_visc_rem) then
-                            u_cor(I, j, k) = u(I, j, k) + CS%du(I, j) * visc_rem_u(I, j, k)
-                        else
-                            u_cor(I, j, k) = u(I, j, k) + CS%du(I, j)
-                        end if
-                    end do
-                end do
-            end do
-        end if
-
-        if (present(du_cor)) then
-            !$acc parallel loop collapse(2) default(present)
-            do j = jsh, jeh
-                do I = ish - 1, ieh
-                    du_cor(I, j) = CS%du(I, j)
-                end do
-            end do
-        end if
-
     end subroutine zonal_flux_adjust_gpu
 
 !> GPU kernel: Compute BT_cont face areas. collapse(2) over (j, I).
@@ -910,7 +919,12 @@ contains
         min_visc_rem = 0.1_dp
         CFL_min_val = 1.0e-6_dp
 
-        !$acc parallel loop collapse(2) default(present) &
+        !$acc parallel loop collapse(2) &
+        !$acc   present(u, h_in, h_W, h_E, visc_rem_u, por_face_areaU) &
+        !$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, CS%visc_rem_max) &
+        !$acc   present(G, G%IareaT, G%dy_Cu, G%IdxT, G%dxCu, G%areaT, G%dxT) &
+        !$acc   present(BT_cont, BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW) &
+        !$acc   present(BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE) &
         !$acc   private(du0_val, du_val, du_prev, ddu, uh_err_val, duhdu_tot_val, &
         !$acc           du_max_val, du_min_val, uh_err_best_val, tol_eta, tol_vel, &
         !$acc           duL_val, duR_val, du_CFL_val, visc_rem_lim, visc_rem_val, &
