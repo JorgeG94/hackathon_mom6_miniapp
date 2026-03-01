@@ -59,23 +59,15 @@ endif()
 
 add_library(
   mom6_modules STATIC
-  src/mom6_types.F90
-  src/mom6_profiler.F90
-  src/mom6_continuity.F90
-  src/mom6_continuity_adjust.F90
-  src/mom6_coriolis.F90
-  src/mom6_barotropic.F90
-  src/mom6_vert_visc.F90
-  src/mom6_hor_visc.F90
-  src/mom6_diag.F90)
-
-# Work around nvfortran >=O2 codegen bug in complex OpenACC GPU kernels
-# (CUDA_EXCEPTION_14 Warp Illegal Address). Only the two routines in the
-# submodule file are affected; everything else stays at -O3.
-if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
-  set_source_files_properties(src/mom6_continuity_adjust.F90
-    PROPERTIES COMPILE_OPTIONS "-O1")
-endif()
+  src/common/mom6_types.F90
+  src/common/mom6_profiler.F90
+  src/common/mom6_diag.F90
+  src/openacc/mom6_continuity.F90
+  src/openacc/mom6_continuity_adjust.F90
+  src/openacc/mom6_coriolis.F90
+  src/openacc/mom6_barotropic.F90
+  src/openacc/mom6_vert_visc.F90
+  src/openacc/mom6_hor_visc.F90)
 
 # Set module output directory
 set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
@@ -130,11 +122,11 @@ if(ENABLE_CUDA_KERNELS)
 
   add_library(
     mom6_cuda_kernels STATIC
-    src/cuda_kernels/mom6_coriolis_cuda.F90
-    src/cuda_kernels/mom6_vert_visc_cuda.F90
-    src/cuda_kernels/mom6_barotropic_cuda.F90
-    src/cuda_kernels/mom6_hor_visc_cuda.F90
-    src/cuda_kernels/mom6_continuity_cuda.F90)
+    src/cuda/mom6_coriolis_cuda.F90
+    src/cuda/mom6_vert_visc_cuda.F90
+    src/cuda/mom6_barotropic_cuda.F90
+    src/cuda/mom6_hor_visc_cuda.F90
+    src/cuda/mom6_continuity_cuda.F90)
 
   set_target_properties(mom6_cuda_kernels PROPERTIES Fortran_MODULE_DIRECTORY
                                                      ${CMAKE_BINARY_DIR}/mod)
@@ -158,6 +150,15 @@ if(ENABLE_CUDA_KERNELS)
   add_compare_driver(barotropic_compare_driver app/barotropic_compare_driver.F90)
   add_compare_driver(hor_visc_compare_driver app/hor_visc_compare_driver.F90)
   add_compare_driver(continuity_compare_driver app/continuity_compare_driver.F90)
+
+  # CUDA-only drivers (explicit CUDA Fortran kernels)
+  # Reuse the same helper — they all need mom6_modules (for types) + mom6_cuda_kernels
+  add_compare_driver(continuity_cuda_driver app/continuity_cuda_driver.F90)
+  add_compare_driver(coriolis_cuda_driver app/coriolis_cuda_driver.F90)
+  add_compare_driver(barotropic_cuda_driver app/barotropic_cuda_driver.F90)
+  add_compare_driver(vert_visc_cuda_driver app/vert_visc_cuda_driver.F90)
+  add_compare_driver(hor_visc_cuda_driver app/hor_visc_cuda_driver.F90)
+  add_compare_driver(rk2_cuda_driver app/rk2_cuda_driver.F90)
 endif()
 
 # =============================================================================
@@ -193,6 +194,12 @@ if(ENABLE_CUDA_KERNELS)
   add_test(NAME barotropic_compare_small COMMAND barotropic_compare_driver 60 60 15 2)
   add_test(NAME hor_visc_compare_small COMMAND hor_visc_compare_driver 60 60 30 2)
   add_test(NAME continuity_compare_small COMMAND continuity_compare_driver 60 60 30 2)
+  add_test(NAME continuity_cuda_small COMMAND continuity_cuda_driver 60 60 30 2)
+  add_test(NAME coriolis_cuda_small COMMAND coriolis_cuda_driver 60 60 30 2)
+  add_test(NAME barotropic_cuda_small COMMAND barotropic_cuda_driver 60 60 15 2)
+  add_test(NAME vert_visc_cuda_small COMMAND vert_visc_cuda_driver 60 60 30 2)
+  add_test(NAME hor_visc_cuda_small COMMAND hor_visc_cuda_driver 60 60 30 2)
+  add_test(NAME rk2_cuda_small COMMAND rk2_cuda_driver 60 60 30 2 15)
 endif()
 
 # =============================================================================

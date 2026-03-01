@@ -17,15 +17,15 @@
 FC ?= gfortran
 
 # Directories
-SRCDIR = src
-APPDIR = app
-CUDADIR = src/cuda_kernels
+SRCDIR_COMMON  = src/common
+SRCDIR_OPENACC = src/openacc
+SRCDIR_CUDA    = src/cuda
+APPDIR   = app
 BUILDDIR = build
 
 # Compiler-specific flags (use findstring to match full paths)
 ifneq (,$(findstring nvfortran,$(FC)))
   FFLAGS = -O3  -mp=multicore,gpu -acc=multicore,gpu -gpu=mem:separate
-  FFLAGS_CONTINUITY_ADJUST = -O3 -mp=multicore,gpu -acc=multicore,gpu -gpu=mem:separate
   LDFLAGS = -cudalib=nvtx
   MODFLAG = -module
 else ifneq (,$(findstring gfortran,$(FC)))
@@ -53,9 +53,6 @@ else
   LDFLAGS =
   MODFLAG = -J
 endif
-
-# Default FFLAGS_CONTINUITY_ADJUST to FFLAGS for compilers without the nvfortran bug
-FFLAGS_CONTINUITY_ADJUST ?= $(FFLAGS)
 
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
@@ -101,33 +98,32 @@ $(BUILDDIR):
 # Module compilation (order matters due to dependencies)
 #==============================================================================
 
-$(BUILDDIR)/mom6_types.o: $(SRCDIR)/mom6_types.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_types.o: $(SRCDIR_COMMON)/mom6_types.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_profiler.o: $(SRCDIR)/mom6_profiler.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_profiler.o: $(SRCDIR_COMMON)/mom6_profiler.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-# Parent module — compiled at -O3 (no longer contains the buggy routine)
-$(BUILDDIR)/mom6_continuity.o: $(SRCDIR)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
+$(BUILDDIR)/mom6_continuity.o: $(SRCDIR_OPENACC)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-# Submodule with zonal_flux_adjust_gpu and set_zonal_BT_cont_gpu — compiled at -O1 to work around nvfortran codegen bug
-$(BUILDDIR)/mom6_continuity_adjust.o: $(SRCDIR)/mom6_continuity_adjust.F90 $(BUILDDIR)/mom6_continuity.o
-	$(FC) $(FFLAGS_CONTINUITY_ADJUST) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_coriolis.o: $(SRCDIR)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
+# Submodule with zonal_flux_adjust_gpu and set_zonal_BT_cont_gpu
+$(BUILDDIR)/mom6_continuity_adjust.o: $(SRCDIR_OPENACC)/mom6_continuity_adjust.F90 $(BUILDDIR)/mom6_continuity.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_barotropic.o: $(SRCDIR)/mom6_barotropic.F90 $(BUILDDIR)/mom6_types.o
+$(BUILDDIR)/mom6_coriolis.o: $(SRCDIR_OPENACC)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_vert_visc.o: $(SRCDIR)/mom6_vert_visc.F90 $(BUILDDIR)/mom6_types.o
+$(BUILDDIR)/mom6_barotropic.o: $(SRCDIR_OPENACC)/mom6_barotropic.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_hor_visc.o: $(SRCDIR)/mom6_hor_visc.F90 $(BUILDDIR)/mom6_types.o
+$(BUILDDIR)/mom6_vert_visc.o: $(SRCDIR_OPENACC)/mom6_vert_visc.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_diag.o: $(SRCDIR)/mom6_diag.F90 $(BUILDDIR)/mom6_types.o
+$(BUILDDIR)/mom6_hor_visc.o: $(SRCDIR_OPENACC)/mom6_hor_visc.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_diag.o: $(SRCDIR_COMMON)/mom6_diag.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 #==============================================================================
@@ -156,19 +152,19 @@ rk2_driver: $(APPDIR)/rk2_driver.F90 $(MODULES)
 # CUDA Fortran kernel compilation (nvfortran only, -cuda flag)
 #==============================================================================
 
-$(BUILDDIR)/mom6_coriolis_cuda.o: $(CUDADIR)/mom6_coriolis_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_coriolis_cuda.o: $(SRCDIR_CUDA)/mom6_coriolis_cuda.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_vert_visc_cuda.o: $(CUDADIR)/mom6_vert_visc_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_vert_visc_cuda.o: $(SRCDIR_CUDA)/mom6_vert_visc_cuda.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_barotropic_cuda.o: $(CUDADIR)/mom6_barotropic_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_barotropic_cuda.o: $(SRCDIR_CUDA)/mom6_barotropic_cuda.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_hor_visc_cuda.o: $(CUDADIR)/mom6_hor_visc_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_hor_visc_cuda.o: $(SRCDIR_CUDA)/mom6_hor_visc_cuda.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-$(BUILDDIR)/mom6_continuity_cuda.o: $(CUDADIR)/mom6_continuity_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/mom6_continuity_cuda.o: $(SRCDIR_CUDA)/mom6_continuity_cuda.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 #==============================================================================

@@ -59,8 +59,7 @@ module mom6_continuity
 
     interface
         !> Newton iteration to adjust zonal fluxes to match barotropic transport (GPU version).
-        !! Implemented in submodule mom6_continuity_adjust, compiled with -O1 to work around
-        !! nvfortran >=O2 codegen bug (CUDA_EXCEPTION_14 Warp Illegal Address).
+        !! Implemented in submodule mom6_continuity_adjust.
         module subroutine zonal_flux_adjust_gpu(u, h_in, h_W, h_E, uhbt, uh, CS, &
                                          visc_rem_u, dt, G, GV, por_face_areaU, &
                                          use_visc_rem)
@@ -77,7 +76,7 @@ module mom6_continuity
         end subroutine zonal_flux_adjust_gpu
 
         !> GPU kernel: Compute BT_cont face areas (Newton + 3 test velocities).
-        !! Also compiled at -O1 to work around the same nvfortran codegen bug.
+        !! Implemented in submodule mom6_continuity_adjust.
         module subroutine set_zonal_BT_cont_gpu(u, h_in, h_W, h_E, BT_cont, CS, &
                                          visc_rem_u, dt, G, GV, por_face_areaU, use_visc_rem)
             type(ocean_grid_type), intent(in) :: G

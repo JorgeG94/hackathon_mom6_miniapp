@@ -41,3 +41,34 @@ build/*
 
 # debug information files
 *.dwo
+
+# Profiling reports (nsys, nsight)
+*.nsys-rep
+*.sqlite
+
+# Build/debug logs
+*.log
+
+# Scratch files
+a.f90
+cont_plan.md
+
+# Driver binaries (built by Makefile in project root)
+continuity_driver
+coriolis_driver
+barotropic_driver
+vert_visc_driver
+hor_visc_driver
+rk2_driver
+continuity_cuda_driver
+coriolis_cuda_driver
+barotropic_cuda_driver
+vert_visc_cuda_driver
+hor_visc_cuda_driver
+rk2_cuda_driver
+coriolis_compare_driver
+vert_visc_compare_driver
+barotropic_compare_driver
+hor_visc_compare_driver
+continuity_compare_driver
+test_kernels_driver
