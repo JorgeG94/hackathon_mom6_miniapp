@@ -6,6 +6,7 @@ project(
   LANGUAGES Fortran
   DESCRIPTION "MOM6 Mini-Apps")
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Set default build type
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE
@@ -61,11 +62,20 @@ add_library(
   src/mom6_types.F90
   src/mom6_profiler.F90
   src/mom6_continuity.F90
+  src/mom6_continuity_adjust.F90
   src/mom6_coriolis.F90
   src/mom6_barotropic.F90
   src/mom6_vert_visc.F90
   src/mom6_hor_visc.F90
   src/mom6_diag.F90)
+
+# Work around nvfortran >=O2 codegen bug in complex OpenACC GPU kernels
+# (CUDA_EXCEPTION_14 Warp Illegal Address). Only the two routines in the
+# submodule file are affected; everything else stays at -O3.
+if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+  set_source_files_properties(src/mom6_continuity_adjust.F90
+    PROPERTIES COMPILE_OPTIONS "-O1")
+endif()
 
 # Set module output directory
 set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY

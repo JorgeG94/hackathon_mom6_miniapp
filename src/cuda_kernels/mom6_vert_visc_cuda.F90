@@ -2,8 +2,9 @@
 !!
 !! Uses explicit attributes(global) CUDA kernels for GPU execution.
 !! Column-parallel pattern: collapse(2) over j,i with serial k-loop per thread.
-!! Each thread owns a full water column. Two private arrays per thread:
-!! hvel(nz) and z_i(nz+1) declared as automatic arrays inside the kernel.
+!! Each thread owns a full water column. Two workspace arrays per thread:
+!! hvel(i,j,k) and z_i(i,j,k) are pre-allocated 3D device arrays in the CS type,
+!! eliminating GPU heap dependency for per-thread auto arrays.
 !! Coupling coefficients a_col are computed on-the-fly as scalars; the
 !! tridiagonal c1 scratch is stored into z_i (dead after coef phase).
 !!
@@ -43,6 +44,10 @@ module mom6_vert_visc_cuda
         ! Grid metrics on device (2D, copied once at init)
         real(dp), device, allocatable :: mask2dCu_d(:,:)
         real(dp), device, allocatable :: mask2dCv_d(:,:)
+
+        ! Pre-allocated workspace for tridiagonal column solver (eliminates GPU heap)
+        real(dp), device, allocatable :: hvel_d(:,:,:)   ! (isd:ied, jsd:jed, nz)
+        real(dp), device, allocatable :: z_i_d(:,:,:)    ! (isd:ied, jsd:jed, nz+1)
     end type vert_visc_CS_cuda
 
 contains
@@ -70,7 +75,8 @@ contains
             u, h, mask2dCu, visc_rem_u, taux_bot, taux, &
             Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
-            n1, n2, nz, is_l, ie_l, js_l, je_l)
+            n1, n2, nz, is_l, ie_l, js_l, je_l, &
+            hvel, z_i)
         integer, value, intent(in) :: n1, n2, nz, is_l, ie_l, js_l, je_l
         real(dp), intent(inout) :: u(n1, n2, nz)
         real(dp), intent(in)    :: h(n1, n2, nz)
@@ -80,9 +86,8 @@ contains
         real(dp), intent(in)    :: taux(n1, n2)
         real(dp), value, intent(in) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
         real(dp), value, intent(in) :: dt, dt_Rho0, h_neglect, I_Hbbl
-
-        ! Thread-local private arrays (automatic, on-stack / local memory)
-        real(dp) :: hvel(nz), z_i(nz + 1)
+        real(dp), intent(inout) :: hvel(n1, n2, nz)
+        real(dp), intent(inout) :: z_i(n1, n2, nz + 1)
 
         ! Local scalars
         real(dp) :: h_harm, h_arith, h_delta, z2, botfn
@@ -102,7 +107,7 @@ contains
             ! ============================================================
             ! Coefficient phase: bottom-up hvel and z_i computation
             ! ============================================================
-            z_i(nz + 1) = 0.0_dp
+            z_i(i, j, nz + 1) = 0.0_dp
 
             do k = nz, 1, -1
                 h_harm = 2.0_dp * h(i, j, k) * h(i + 1, j, k) / &
@@ -110,15 +115,15 @@ contains
                 h_arith = 0.5_dp * (h(i + 1, j, k) + h(i, j, k))
                 h_delta = h(i + 1, j, k) - h(i, j, k)
 
-                hvel(k) = h_harm
+                hvel(i, j, k) = h_harm
 
                 if (u(i, j, k) * h_delta < 0.0_dp) then
-                    z2 = z_i(k + 1)
+                    z2 = z_i(i, j, k + 1)
                     botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
-                    hvel(k) = (1.0_dp - botfn) * h_harm + botfn * h_arith
+                    hvel(i, j, k) = (1.0_dp - botfn) * h_harm + botfn * h_arith
                 end if
 
-                z_i(k) = z_i(k + 1) + h_harm * I_Hbbl
+                z_i(i, j, k) = z_i(i, j, k + 1) + h_harm * I_Hbbl
             end do
 
             ! ============================================================
@@ -130,23 +135,23 @@ contains
 
             ! Compute a_col(2) on the fly
             if (nz > 1) then
-                z_top = hvel(1)
+                z_top = hvel(i, j, 1)
                 Kv_tot = Kv
                 if (z_top < Hmix) then
                     topfn = 1.0_dp - z_top / Hmix
                     Kv_tot = Kv_tot + (Kv_ml - Kv) * topfn
                 end if
-                z2 = z_i(2)
+                z2 = z_i(i, j, 2)
                 botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
                 Kv_tot = Kv_tot + Kv_extra_bbl * botfn
-                h_shear = 0.5_dp * (hvel(2) + hvel(1) + h_neglect)
+                h_shear = 0.5_dp * (hvel(i, j, 2) + hvel(i, j, 1) + h_neglect)
                 a_k1 = Kv_tot / h_shear
             else
-                a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(nz) + h_neglect)
+                a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(i, j, nz) + h_neglect)
             end if
 
             ! Layer 1
-            h_eff = hvel(1) + h_neglect
+            h_eff = hvel(i, j, 1) + h_neglect
             b_denom_1 = h_eff + dt * a_k
             b1 = 1.0_dp / (b_denom_1 + dt * a_k1)
             d1 = b_denom_1 * b1
@@ -155,29 +160,29 @@ contains
 
             ! Interior layers -- a_col computed on the fly, c1 stored in z_i
             do k = 2, nz
-                ! Store c1(k) in z_i(k) (z_i(k) dead after coef phase for k-1)
-                z_i(k) = dt * a_k1 * b1
+                ! Store c1(k) in z_i(i,j,k) (z_i dead after coef phase for k-1)
+                z_i(i, j, k) = dt * a_k1 * b1
 
                 a_k = a_k1  ! shift: a_col(k) = previous a_col(k+1)
 
                 ! Compute a_col(k+1) on the fly
                 if (k < nz) then
-                    z_top = z_top + hvel(k)
+                    z_top = z_top + hvel(i, j, k)
                     Kv_tot = Kv
                     if (z_top < Hmix) then
                         topfn = 1.0_dp - z_top / Hmix
                         Kv_tot = Kv_tot + (Kv_ml - Kv) * topfn
                     end if
-                    z2 = z_i(k + 1)
+                    z2 = z_i(i, j, k + 1)
                     botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
                     Kv_tot = Kv_tot + Kv_extra_bbl * botfn
-                    h_shear = 0.5_dp * (hvel(k + 1) + hvel(k) + h_neglect)
+                    h_shear = 0.5_dp * (hvel(i, j, k + 1) + hvel(i, j, k) + h_neglect)
                     a_k1 = Kv_tot / h_shear
                 else
-                    a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(nz) + h_neglect)
+                    a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(i, j, nz) + h_neglect)
                 end if
 
-                h_eff = hvel(k) + h_neglect
+                h_eff = hvel(i, j, k) + h_neglect
                 b_denom_1 = h_eff + dt * (a_k * d1)
                 b1 = 1.0_dp / (b_denom_1 + dt * a_k1)
                 d1 = b_denom_1 * b1
@@ -190,8 +195,8 @@ contains
             ! Combined back substitution (c1 stored in z_i)
             do k = nz - 1, 1, -1
                 visc_rem_u(i, j, k) = visc_rem_u(i, j, k) + &
-                    z_i(k + 1) * visc_rem_u(i, j, k + 1)
-                u(i, j, k) = u(i, j, k) + z_i(k + 1) * u(i, j, k + 1)
+                    z_i(i, j, k + 1) * visc_rem_u(i, j, k + 1)
+                u(i, j, k) = u(i, j, k) + z_i(i, j, k + 1) * u(i, j, k + 1)
             end do
 
             ! Bottom stress (a_k1 is a_col(nz+1) after the loop)
@@ -214,7 +219,8 @@ contains
             v, h, mask2dCv, visc_rem_v, tauy_bot, tauy, &
             Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
-            n1, n2, nz, is_l, ie_l, js_l, je_l)
+            n1, n2, nz, is_l, ie_l, js_l, je_l, &
+            hvel, z_i)
         integer, value, intent(in) :: n1, n2, nz, is_l, ie_l, js_l, je_l
         real(dp), intent(inout) :: v(n1, n2, nz)
         real(dp), intent(in)    :: h(n1, n2, nz)
@@ -224,9 +230,8 @@ contains
         real(dp), intent(in)    :: tauy(n1, n2)
         real(dp), value, intent(in) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
         real(dp), value, intent(in) :: dt, dt_Rho0, h_neglect, I_Hbbl
-
-        ! Thread-local private arrays (automatic, on-stack / local memory)
-        real(dp) :: hvel(nz), z_i(nz + 1)
+        real(dp), intent(inout) :: hvel(n1, n2, nz)
+        real(dp), intent(inout) :: z_i(n1, n2, nz + 1)
 
         ! Local scalars
         real(dp) :: h_harm, h_arith, h_delta, z2, botfn
@@ -246,7 +251,7 @@ contains
             ! ============================================================
             ! Coefficient phase: bottom-up hvel and z_i computation
             ! ============================================================
-            z_i(nz + 1) = 0.0_dp
+            z_i(i, j, nz + 1) = 0.0_dp
 
             do k = nz, 1, -1
                 h_harm = 2.0_dp * h(i, j, k) * h(i, j + 1, k) / &
@@ -254,15 +259,15 @@ contains
                 h_arith = 0.5_dp * (h(i, j + 1, k) + h(i, j, k))
                 h_delta = h(i, j + 1, k) - h(i, j, k)
 
-                hvel(k) = h_harm
+                hvel(i, j, k) = h_harm
 
                 if (v(i, j, k) * h_delta < 0.0_dp) then
-                    z2 = z_i(k + 1)
+                    z2 = z_i(i, j, k + 1)
                     botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
-                    hvel(k) = (1.0_dp - botfn) * h_harm + botfn * h_arith
+                    hvel(i, j, k) = (1.0_dp - botfn) * h_harm + botfn * h_arith
                 end if
 
-                z_i(k) = z_i(k + 1) + h_harm * I_Hbbl
+                z_i(i, j, k) = z_i(i, j, k + 1) + h_harm * I_Hbbl
             end do
 
             ! ============================================================
@@ -274,23 +279,23 @@ contains
 
             ! Compute a_col(2) on the fly
             if (nz > 1) then
-                z_top = hvel(1)
+                z_top = hvel(i, j, 1)
                 Kv_tot = Kv
                 if (z_top < Hmix) then
                     topfn = 1.0_dp - z_top / Hmix
                     Kv_tot = Kv_tot + (Kv_ml - Kv) * topfn
                 end if
-                z2 = z_i(2)
+                z2 = z_i(i, j, 2)
                 botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
                 Kv_tot = Kv_tot + Kv_extra_bbl * botfn
-                h_shear = 0.5_dp * (hvel(2) + hvel(1) + h_neglect)
+                h_shear = 0.5_dp * (hvel(i, j, 2) + hvel(i, j, 1) + h_neglect)
                 a_k1 = Kv_tot / h_shear
             else
-                a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(nz) + h_neglect)
+                a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(i, j, nz) + h_neglect)
             end if
 
             ! Layer 1
-            h_eff = hvel(1) + h_neglect
+            h_eff = hvel(i, j, 1) + h_neglect
             b_denom_1 = h_eff + dt * a_k
             b1 = 1.0_dp / (b_denom_1 + dt * a_k1)
             d1 = b_denom_1 * b1
@@ -299,27 +304,27 @@ contains
 
             ! Interior layers
             do k = 2, nz
-                z_i(k) = dt * a_k1 * b1  ! c1(k) stored in z_i(k)
+                z_i(i, j, k) = dt * a_k1 * b1  ! c1(k) stored in z_i(i,j,k)
 
                 a_k = a_k1
 
                 if (k < nz) then
-                    z_top = z_top + hvel(k)
+                    z_top = z_top + hvel(i, j, k)
                     Kv_tot = Kv
                     if (z_top < Hmix) then
                         topfn = 1.0_dp - z_top / Hmix
                         Kv_tot = Kv_tot + (Kv_ml - Kv) * topfn
                     end if
-                    z2 = z_i(k + 1)
+                    z2 = z_i(i, j, k + 1)
                     botfn = 1.0_dp / (1.0_dp + 0.09_dp * z2*z2*z2*z2*z2*z2)
                     Kv_tot = Kv_tot + Kv_extra_bbl * botfn
-                    h_shear = 0.5_dp * (hvel(k + 1) + hvel(k) + h_neglect)
+                    h_shear = 0.5_dp * (hvel(i, j, k + 1) + hvel(i, j, k) + h_neglect)
                     a_k1 = Kv_tot / h_shear
                 else
-                    a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(nz) + h_neglect)
+                    a_k1 = (Kv + Kv_extra_bbl) / (0.5_dp * hvel(i, j, nz) + h_neglect)
                 end if
 
-                h_eff = hvel(k) + h_neglect
+                h_eff = hvel(i, j, k) + h_neglect
                 b_denom_1 = h_eff + dt * (a_k * d1)
                 b1 = 1.0_dp / (b_denom_1 + dt * a_k1)
                 d1 = b_denom_1 * b1
@@ -332,8 +337,8 @@ contains
             ! Combined back substitution (c1 stored in z_i)
             do k = nz - 1, 1, -1
                 visc_rem_v(i, j, k) = visc_rem_v(i, j, k) + &
-                    z_i(k + 1) * visc_rem_v(i, j, k + 1)
-                v(i, j, k) = v(i, j, k) + z_i(k + 1) * v(i, j, k + 1)
+                    z_i(i, j, k + 1) * visc_rem_v(i, j, k + 1)
+                v(i, j, k) = v(i, j, k) + z_i(i, j, k + 1) * v(i, j, k + 1)
             end do
 
             ! Bottom stress (a_k1 is a_col(nz+1) after the loop)
@@ -387,6 +392,10 @@ contains
         allocate(CS%mask2dCu_d(isd:ied, jsd:jed)); CS%mask2dCu_d = mask2dCu
         allocate(CS%mask2dCv_d(isd:ied, jsd:jed)); CS%mask2dCv_d = mask2dCv
 
+        ! Pre-allocate workspace for tridiagonal column solver
+        allocate(CS%hvel_d(isd:ied, jsd:jed, nk))
+        allocate(CS%z_i_d(isd:ied, jsd:jed, nk+1))
+
         CS%initialized = .true.
 
     end subroutine vert_visc_init_cuda
@@ -438,14 +447,16 @@ contains
             u_d, h_d, CS%mask2dCu_d, CS%visc_rem_u, CS%taux_bot, taux_d, &
             CS%Kv, CS%Kv_ml, CS%Kv_extra_bbl, CS%Hmix, CS%Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
-            n1, n2, nz, is_l, ie_l, js_l, je_l)
+            n1, n2, nz, is_l, ie_l, js_l, je_l, &
+            CS%hvel_d, CS%z_i_d)
 
         ! Launch v-points kernel
         call vert_visc_cra_v_kernel<<<grid, tBlock>>>( &
             v_d, h_d, CS%mask2dCv_d, CS%visc_rem_v, CS%tauy_bot, tauy_d, &
             CS%Kv, CS%Kv_ml, CS%Kv_extra_bbl, CS%Hmix, CS%Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
-            n1, n2, nz, is_l, ie_l, js_l, je_l)
+            n1, n2, nz, is_l, ie_l, js_l, je_l, &
+            CS%hvel_d, CS%z_i_d)
 
         ! Sync to ensure all output is ready before returning
         istat = cudaDeviceSynchronize()
@@ -465,6 +476,8 @@ contains
         if (allocated(CS%tauy_bot)) deallocate(CS%tauy_bot)
         if (allocated(CS%mask2dCu_d)) deallocate(CS%mask2dCu_d)
         if (allocated(CS%mask2dCv_d)) deallocate(CS%mask2dCv_d)
+        if (allocated(CS%hvel_d)) deallocate(CS%hvel_d)
+        if (allocated(CS%z_i_d)) deallocate(CS%z_i_d)
 
         CS%initialized = .false.
 

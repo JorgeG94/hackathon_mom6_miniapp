@@ -194,7 +194,7 @@ contains
                 G%dxCu(i, j) = dx_m
                 G%dyCu(i, j) = dx_m
                 ! TODO: fix this with the continuity solver
-                G%dy_Cu(i, j) = dx_m
+                G%dy_Cu(i, j) = 0.0_dp !dx_m
                 G%IdxCu(i, j) = 1.0_dp/dx_m
                 G%IdyCu(i, j) = 1.0_dp/dx_m
                 G%dxCv(i, j) = dx_m
