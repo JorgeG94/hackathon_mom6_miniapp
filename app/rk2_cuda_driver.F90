@@ -16,6 +16,8 @@ program rk2_cuda_driver
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
                           init_verticalGrid, end_ocean_grid, G_EARTH
+    use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
+                             profiler_report
 
     ! CUDA kernel modules
     use mom6_continuity_cuda, only: continuity_CS_cuda, continuity_init_cuda, &
@@ -109,6 +111,9 @@ program rk2_cuda_driver
         call get_command_argument(5, arg); read (arg, *) bt_nsteps
     end if
 
+    call profiler_init()
+    call profiler_start("Total")
+
     print '(A)', '================================================================'
     print '(A)', 'MOM6 Split RK2 — CUDA Fortran Driver'
     print '(A)', '================================================================'
@@ -124,6 +129,7 @@ program rk2_cuda_driver
     !=========================================================================
     ! INITIALIZATION
     !=========================================================================
+    call profiler_start("Initialization")
     t_init_start = omp_get_wtime()
 
     ! Initialize grid
@@ -228,6 +234,7 @@ program rk2_cuda_driver
     call initialize_stress(taux_d, tauy_d, G)
 
     t_init_end = omp_get_wtime()
+    call profiler_stop("Initialization")
 
     print '(A)', ''
     print '(A,F12.6,A)', 'Initialization time: ', t_init_end - t_init_start, ' s'
@@ -236,6 +243,7 @@ program rk2_cuda_driver
     !=========================================================================
     ! WARMUP
     !=========================================================================
+    call profiler_start("Warmup")
     print '(A)', 'Warming up CUDA kernels...'
     call compute_transports_cuda(u_d, v_d, h_d, uh_d, vh_d, dyCu_d, dxCv_d, G, GV)
     call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
@@ -247,6 +255,7 @@ program rk2_cuda_driver
     ! Reset state after warmup
     u_d = u_h; v_d = v_h; h_d = h_h
     eta_d = eta_h; ubt_d = ubt_h; vbt_d = vbt_h
+    call profiler_stop("Warmup")
 
     !=========================================================================
     ! RK2 TIME-STEPPING LOOP
@@ -261,6 +270,7 @@ program rk2_cuda_driver
     t_hor_visc = 0.0_dp
     t_compute = 0.0_dp
 
+    call profiler_start("RK2_step", nvtx_only=.true.)
     do iter = 1, niter
         t_iter_start = omp_get_wtime()
 
@@ -272,93 +282,122 @@ program rk2_cuda_driver
         !=====================================================================
 
         ! 1. Compute layer transports
+        call profiler_start("Transports")
         call compute_transports_cuda(u_d, v_d, h_d, uh_d, vh_d, dyCu_d, dxCv_d, G, GV)
+        call profiler_stop("Transports")
 
         ! 2. Horizontal viscosity
+        call profiler_start("HorVisc")
         t_start = omp_get_wtime()
         call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
+        call profiler_stop("HorVisc")
 
         ! 3. Coriolis and momentum advection
+        call profiler_start("Coriolis")
         t_start = omp_get_wtime()
         call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
+        call profiler_stop("Coriolis")
 
         ! 4. Predictor velocity update: up = u + dt*(CAu + diffu)
+        call profiler_start("VelUpdate_pred")
         call velocity_update_cuda(up_d, u_d, CAu_d, diffu_d, dt, &
                                   G%isc, G%iec-1, G%jsc, G%jec, nk)
         call velocity_update_cuda(vp_d, v_d, CAv_d, diffv_d, dt, &
                                   G%isc, G%iec, G%jsc, G%jec-1, nk)
+        call profiler_stop("VelUpdate_pred")
 
         ! 5. Vertical viscosity on predictor velocities
+        call profiler_start("VertVisc")
         t_start = omp_get_wtime()
         call vert_visc_cra_cuda(up_d, vp_d, h_d, dt, visc_CS, taux_d, tauy_d)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
+        call profiler_stop("VertVisc")
 
         ! 6. Barotropic predictor step
+        call profiler_start("Barotropic")
         t_start = omp_get_wtime()
         call btstep_cuda(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d, bt_CS_cuda)
         t_end = omp_get_wtime()
         t_barotropic = t_barotropic + (t_end - t_start)
+        call profiler_stop("Barotropic")
 
         ! 7. Continuity (update thicknesses)
+        call profiler_start("Continuity")
         t_start = omp_get_wtime()
         call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
+        call profiler_stop("Continuity")
 
         !=====================================================================
         ! CORRECTOR PHASE
         !=====================================================================
 
         ! 8. Recompute transports with updated thickness
+        call profiler_start("Transports")
         call compute_transports_cuda(up_d, vp_d, h_d, uh_d, vh_d, dyCu_d, dxCv_d, G, GV)
+        call profiler_stop("Transports")
 
         ! 9. Horizontal viscosity with updated state
+        call profiler_start("HorVisc")
         t_start = omp_get_wtime()
         call hor_visc_cuda(up_d, vp_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
+        call profiler_stop("HorVisc")
 
         ! 10. Coriolis with updated state
+        call profiler_start("Coriolis")
         t_start = omp_get_wtime()
         call CorAdCalc_cuda(up_d, vp_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
+        call profiler_stop("Coriolis")
 
         ! 11. Corrector velocity update: u = u + 0.5*dt*(CAu + diffu)
+        call profiler_start("VelUpdate_corr")
         call velocity_update_cuda(u_d, u_d, CAu_d, diffu_d, 0.5_dp*dt, &
                                   G%isc, G%iec-1, G%jsc, G%jec, nk)
         call velocity_update_cuda(v_d, v_d, CAv_d, diffv_d, 0.5_dp*dt, &
                                   G%isc, G%iec, G%jsc, G%jec-1, nk)
+        call profiler_stop("VelUpdate_corr")
 
         ! 12. Vertical viscosity on corrector velocities
+        call profiler_start("VertVisc")
         t_start = omp_get_wtime()
         call vert_visc_cra_cuda(u_d, v_d, h_d, 0.5_dp*dt, visc_CS, taux_d, tauy_d)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
+        call profiler_stop("VertVisc")
 
         ! 13. Barotropic corrector
+        call profiler_start("Barotropic")
         t_start = omp_get_wtime()
         call btstep_cuda(eta_av_d, ubt_av_d, vbt_av_d, ubt_av_d, vbt_av_d, eta_d, bt_CS_cuda)
         t_end = omp_get_wtime()
         t_barotropic = t_barotropic + (t_end - t_start)
+        call profiler_stop("Barotropic")
 
         ! 14. Final continuity
+        call profiler_start("Continuity")
         t_start = omp_get_wtime()
         htmp_d = h_d
         call continuity_PPM_cuda(u_d, htmp_d, h_d, uh_d, 0.5_dp*dt, cont_CS)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
+        call profiler_stop("Continuity")
 
         t_iter_end = omp_get_wtime()
         t_compute = t_compute + (t_iter_end - t_iter_start)
         print '(A,I4,A,F10.6,A)', '  RK2 iteration ', iter, ':  ', &
             t_iter_end - t_iter_start, ' s'
     end do
+    call profiler_stop("RK2_step")
 
     !=========================================================================
     ! TIMING REPORT
@@ -395,6 +434,7 @@ program rk2_cuda_driver
     !=========================================================================
     ! CLEANUP
     !=========================================================================
+    call profiler_start("Finalize")
     call continuity_end_cuda(cont_CS)
     call coriolis_end_cuda(cor_CS)
     call barotropic_end_cuda(bt_CS_cuda)
@@ -409,6 +449,11 @@ program rk2_cuda_driver
     deallocate (eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d)
     deallocate (taux_d, tauy_d)
     deallocate (dyCu_d, dxCv_d)
+    call profiler_stop("Finalize")
+
+    call profiler_stop("Total")
+    call profiler_report("RK2 CUDA Driver", root_region="Total")
+    call profiler_end()
 
 contains
 

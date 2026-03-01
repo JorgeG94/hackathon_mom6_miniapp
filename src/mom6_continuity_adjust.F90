@@ -1,5 +1,5 @@
-!> Submodule for zonal_flux_adjust_gpu — compiled separately at -O1 to work around
-!! nvfortran >=O2 codegen bug (CUDA_EXCEPTION_14 Warp Illegal Address on u array access).
+!> Submodule for zonal_flux_adjust_gpu and set_zonal_BT_cont_gpu — compiled separately at -O1
+!! to work around nvfortran >=O2 codegen bug (CUDA_EXCEPTION_14 Warp Illegal Address).
 submodule (mom6_continuity) mom6_continuity_adjust
     implicit none
 contains
@@ -20,14 +20,15 @@ contains
         ish = G%isc ; ieh = G%iec ; jsh = G%jsc ; jeh = G%jec ; nz = GV%ke
 
 
-        !$acc parallel loop  collapse(2) &
-        !$acc   present(u, h_in, h_W, h_E, uhbt, uh, visc_rem_u, por_face_areaU) &
-        !$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0) &
-        !$acc   present(CS%du, G, G%IareaT, G%dy_Cu, G%IdxT) &
-        !$acc   private(du_val, du_prev, ddu, uh_err_val, uh_err_best_val, &
-        !$acc           duhdu_tot_val, du_max_val, du_min_val, tol_eta, tol_vel, &
-        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, do_more, &
-        !$acc           k, itt)
+        !!$acc parallel loop  collapse(2) &
+        !!$acc   present(u, h_in, h_W, h_E, uhbt, uh, visc_rem_u, por_face_areaU) &
+        !!$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0) &
+        !!$acc   present(CS%du, G, G%IareaT, G%dy_Cu, G%IdxT) &
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp   private(du_val, du_prev, ddu, uh_err_val, uh_err_best_val, &
+        !$omp           duhdu_tot_val, du_max_val, du_min_val, tol_eta, tol_vel, &
+        !$omp           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, do_more, &
+        !$omp           k, itt)
         do j = jsh, jeh
             do I = ish - 1, ieh
                 du_val = 0.0_dp
@@ -193,18 +194,19 @@ contains
         min_visc_rem = 0.1_dp
         CFL_min_val = 1.0e-6_dp
 
-        !$acc parallel loop collapse(2) &
-        !$acc   present(u, h_in, h_W, h_E, visc_rem_u, por_face_areaU) &
-        !$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, CS%visc_rem_max) &
-        !$acc   present(G, G%IareaT, G%dy_Cu, G%IdxT, G%dxCu, G%areaT, G%dxT) &
-        !$acc   present(BT_cont, BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW) &
-        !$acc   present(BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE) &
-        !$acc   private(du0_val, du_val, du_prev, ddu, uh_err_val, duhdu_tot_val, &
-        !$acc           du_max_val, du_min_val, uh_err_best_val, tol_eta, tol_vel, &
-        !$acc           duL_val, duR_val, du_CFL_val, visc_rem_lim, visc_rem_val, &
-        !$acc           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, &
-        !$acc           FAmt_L_val, FAmt_R_val, FAmt_0_val, uhtot_L_val, uhtot_R_val, &
-        !$acc           FA_0, FA_avg, do_more)
+        !!$acc parallel loop collapse(2) &
+        !!$acc   present(u, h_in, h_W, h_E, visc_rem_u, por_face_areaU) &
+        !!$acc   present(CS, CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, CS%visc_rem_max) &
+        !!$acc   present(G, G%IareaT, G%dy_Cu, G%IdxT, G%dxCu, G%areaT, G%dxT) &
+        !!$acc   present(BT_cont, BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW) &
+        !!$acc   present(BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE) &
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp   private(du0_val, du_val, du_prev, ddu, uh_err_val, duhdu_tot_val, &
+        !$omp           du_max_val, du_min_val, uh_err_best_val, tol_eta, tol_vel, &
+        !$omp           duL_val, duR_val, du_CFL_val, visc_rem_lim, visc_rem_val, &
+        !$omp           CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, &
+        !$omp           FAmt_L_val, FAmt_R_val, FAmt_0_val, uhtot_L_val, uhtot_R_val, &
+        !$omp           FA_0, FA_avg, do_more, k, itt)
         do j = jsh, jeh
             do I = ish - 1, ieh
                 ! --- First: Find du0 (zero-transport correction) via Newton ---

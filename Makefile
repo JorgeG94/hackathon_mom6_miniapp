@@ -111,7 +111,7 @@ $(BUILDDIR)/mom6_profiler.o: $(SRCDIR)/mom6_profiler.F90 | $(BUILDDIR)
 $(BUILDDIR)/mom6_continuity.o: $(SRCDIR)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
-# Submodule with zonal_flux_adjust_gpu — compiled at -O1 to work around nvfortran codegen bug
+# Submodule with zonal_flux_adjust_gpu and set_zonal_BT_cont_gpu — compiled at -O1 to work around nvfortran codegen bug
 $(BUILDDIR)/mom6_continuity_adjust.o: $(SRCDIR)/mom6_continuity_adjust.F90 $(BUILDDIR)/mom6_continuity.o
 	$(FC) $(FFLAGS_CONTINUITY_ADJUST) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
@@ -209,8 +209,8 @@ vert_visc_cuda_driver: $(APPDIR)/vert_visc_cuda_driver.F90 $(BUILDDIR)/mom6_type
 hor_visc_cuda_driver: $(APPDIR)/hor_visc_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(BUILDDIR)/mom6_hor_visc_cuda.o
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(BUILDDIR)/mom6_hor_visc_cuda.o $(LDFLAGS) -cuda
 
-rk2_cuda_driver: $(APPDIR)/rk2_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES)
-	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES) $(LDFLAGS) -cuda
+rk2_cuda_driver: $(APPDIR)/rk2_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES) $(LDFLAGS) -cuda
 
 #==============================================================================
 # Utility targets
