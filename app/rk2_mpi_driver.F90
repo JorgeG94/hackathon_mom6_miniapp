@@ -23,7 +23,8 @@ program rk2_mpi_driver
     use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
     use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                              SADOURNY75_ENERGY
-    use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
+    use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end, &
+                               btstep_init_state, btstep_do_step, btstep_get_output
     use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, &
                               vert_visc_coef_apply, vert_visc_end
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
@@ -78,7 +79,7 @@ program rk2_mpi_driver
     ! Parameters
     integer :: ni, nj, nk, niter, bt_nsteps
     integer :: npes_x, npes_y
-    integer :: iter, i, j, k
+    integer :: iter, i, j, k, bt_n
     integer :: ierr, nprocs, dims(2)
     character(len=32) :: arg
 
@@ -298,10 +299,19 @@ program rk2_mpi_driver
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
-            ! 6. Barotropic predictor step
+            ! 6. Barotropic predictor step (split API with halo exchanges every 3 substeps)
             call profiler_start("Barotropic")
             call system_clock(clock_start, clock_rate)
-            call btstep(eta, ubt, vbt, ubt_av, vbt_av, eta_av, G, bt_CS)
+            call btstep_init_state(bt_CS, G, eta, ubt, vbt)
+            do bt_n = 1, bt_CS%nstep
+                call btstep_do_step(bt_CS, G, bt_n)
+                if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS%nstep) then
+                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                end if
+            end do
+            call btstep_get_output(bt_CS, G, ubt_av, vbt_av, eta_av)
             call system_clock(clock_end)
             t_barotropic = t_barotropic + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Barotropic")
@@ -387,10 +397,19 @@ program rk2_mpi_driver
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
-            ! 13. Barotropic corrector
+            ! 13. Barotropic corrector (split API with halo exchanges every 3 substeps)
             call profiler_start("Barotropic")
             call system_clock(clock_start, clock_rate)
-            call btstep(eta_av, ubt_av, vbt_av, ubt_av, vbt_av, eta, G, bt_CS)
+            call btstep_init_state(bt_CS, G, eta_av, ubt_av, vbt_av)
+            do bt_n = 1, bt_CS%nstep
+                call btstep_do_step(bt_CS, G, bt_n)
+                if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS%nstep) then
+                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                end if
+            end do
+            call btstep_get_output(bt_CS, G, ubt_av, vbt_av, eta)
             call system_clock(clock_end)
             t_barotropic = t_barotropic + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("Barotropic")

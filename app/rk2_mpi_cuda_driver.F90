@@ -25,7 +25,9 @@ program rk2_mpi_cuda_driver
                                    CorAdCalc_cuda, coriolis_end_cuda, &
                                    SADOURNY75_ENERGY_CUDA
     use mom6_barotropic_cuda, only: barotropic_CS_cuda, barotropic_init_cuda, &
-                                     btstep_cuda, barotropic_end_cuda
+                                     btstep_cuda, barotropic_end_cuda, &
+                                     btstep_cuda_init_state, btstep_cuda_do_step, &
+                                     btstep_cuda_get_output
     use mom6_vert_visc_cuda, only: vert_visc_CS_cuda, vert_visc_init_cuda, &
                                     vert_visc_cra_cuda, vert_visc_end_cuda
     use mom6_hor_visc_cuda, only: hor_visc_CS_cuda, hor_visc_init_cuda, &
@@ -83,7 +85,7 @@ program rk2_mpi_cuda_driver
     ! Parameters
     integer :: ni, nj, nk, niter, bt_nsteps
     integer :: npes_x, npes_y
-    integer :: i, j, k, iter, istat
+    integer :: i, j, k, iter, istat, bt_n
     integer :: ierr, nprocs, local_rank, dims(2)
     real(dp) :: dt
     character(len=32) :: arg
@@ -359,10 +361,20 @@ program rk2_mpi_cuda_driver
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
 
-        ! 6. Barotropic predictor
+        ! 6. Barotropic predictor (split API with halo exchanges every 3 substeps)
         call profiler_start("Barotropic")
         t_start = omp_get_wtime()
-        call btstep_cuda(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d, bt_CS_cuda)
+        call btstep_cuda_init_state(bt_CS_cuda, eta_d, ubt_d, vbt_d)
+        do bt_n = 1, bt_CS_cuda%nstep
+            call btstep_cuda_do_step(bt_CS_cuda, bt_n)
+            if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS_cuda%nstep) then
+                istat = cudaDeviceSynchronize()
+                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+            end if
+        end do
+        call btstep_cuda_get_output(bt_CS_cuda, ubt_av_d, vbt_av_d, eta_av_d)
         t_end = omp_get_wtime()
         t_barotropic = t_barotropic + (t_end - t_start)
         call profiler_stop("Barotropic")
@@ -438,10 +450,20 @@ program rk2_mpi_cuda_driver
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
 
-        ! 13. Barotropic corrector
+        ! 13. Barotropic corrector (split API with halo exchanges every 3 substeps)
         call profiler_start("Barotropic")
         t_start = omp_get_wtime()
-        call btstep_cuda(eta_av_d, ubt_av_d, vbt_av_d, ubt_av_d, vbt_av_d, eta_d, bt_CS_cuda)
+        call btstep_cuda_init_state(bt_CS_cuda, eta_av_d, ubt_av_d, vbt_av_d)
+        do bt_n = 1, bt_CS_cuda%nstep
+            call btstep_cuda_do_step(bt_CS_cuda, bt_n)
+            if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS_cuda%nstep) then
+                istat = cudaDeviceSynchronize()
+                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+            end if
+        end do
+        call btstep_cuda_get_output(bt_CS_cuda, ubt_av_d, vbt_av_d, eta_d)
         t_end = omp_get_wtime()
         t_barotropic = t_barotropic + (t_end - t_start)
         call profiler_stop("Barotropic")

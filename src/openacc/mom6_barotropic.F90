@@ -13,6 +13,7 @@ module mom6_barotropic
     private
 
     public :: btstep, barotropic_init, barotropic_end
+    public :: btstep_init_state, btstep_do_step, btstep_get_output
     public :: barotropic_CS
 
     !> Control structure for barotropic solver
@@ -404,5 +405,167 @@ contains
         !$acc end data
 
     end subroutine update_v
+
+    !> Initialize barotropic state from input arrays (split API for MPI drivers).
+    !! Input arrays must already be present on GPU via OpenACC.
+    subroutine btstep_init_state(CS, G, eta_in, ubt_in, vbt_in)
+        type(barotropic_CS), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), intent(in) :: eta_in, ubt_in, vbt_in
+
+        integer :: i, j
+
+        !$acc data present(CS, G, eta_in, ubt_in, vbt_in)
+
+        !$acc parallel loop collapse(2)
+        do j = G%jsd, G%jed
+        do i = G%isd, G%ied
+            CS%eta(i, j) = eta_in(i, j)
+            CS%ubt(i, j) = ubt_in(i, j)
+            CS%vbt(i, j) = vbt_in(i, j)
+            CS%ubt_av(i, j) = 0.0_dp
+            CS%vbt_av(i, j) = 0.0_dp
+        end do
+        end do
+
+        !$acc end data
+
+    end subroutine btstep_init_state
+
+    !> Execute one barotropic substep (split API for MPI drivers).
+    !! All CS and G arrays must already be present on GPU.
+    subroutine btstep_do_step(CS, G, n)
+        type(barotropic_CS), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        integer, intent(in) :: n  ! substep number (1-based)
+
+        real(dp) :: trans_wt1, trans_wt2, inv_nstep
+        logical :: v_first
+        integer :: i, j, is, ie, js, je
+
+        is = G%isc; ie = G%iec; js = G%jsc; je = G%jec
+
+        trans_wt1 = 1.0_dp + CS%bebt
+        trans_wt2 = -CS%bebt
+        inv_nstep = 1.0_dp / real(CS%nstep, dp)
+
+        !$acc data present(CS, G)
+
+        ! Store previous velocities
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is - 1, ie + 1
+            CS%ubt_prev(i, j) = CS%ubt(i, j)
+        end do
+        end do
+        !$acc parallel loop collapse(2)
+        do j = js - 1, je + 1
+        do i = is, ie
+            CS%vbt_prev(i, j) = CS%vbt(i, j)
+        end do
+        end do
+
+        ! Eta predictor
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is, ie
+            CS%eta_pred(i, j) = CS%eta(i, j) + (CS%dtbt*G%IareaT(i, j))* &
+                                (((CS%Datu(i - 1, j)*CS%ubt(i - 1, j)) - (CS%Datu(i, j)*CS%ubt(i, j))) + &
+                                 ((CS%Datv(i, j - 1)*CS%vbt(i, j - 1)) - (CS%Datv(i, j)*CS%vbt(i, j))))
+        end do
+        end do
+
+        ! Pressure force
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is, ie - 1
+            CS%PFu(i, j) = ((CS%eta_pred(i, j)*CS%gtot_E(i, j)) - &
+                            (CS%eta_pred(i + 1, j)*CS%gtot_W(i + 1, j)))* &
+                           CS%dgeo_de*G%IdxCu(i, j)
+        end do
+        end do
+        !$acc parallel loop collapse(2)
+        do j = js, je - 1
+        do i = is, ie
+            CS%PFv(i, j) = ((CS%eta_pred(i, j)*CS%gtot_N(i, j)) - &
+                            (CS%eta_pred(i, j + 1)*CS%gtot_S(i, j + 1)))* &
+                           CS%dgeo_de*G%IdyCv(i, j)
+        end do
+        end do
+
+        ! Alternating u/v update order
+        v_first = (mod(n + G%first_direction, 2) == 1)
+
+        if (v_first) then
+            call update_v(CS, G, is, ie, js, je - 1)
+            call update_u(CS, G, is, ie - 1, js, je)
+        else
+            call update_u(CS, G, is, ie - 1, js, je)
+            call update_v(CS, G, is, ie, js, je - 1)
+        end if
+
+        ! Compute transports and update eta
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is, ie - 1
+            CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
+        end do
+        end do
+        !$acc parallel loop collapse(2)
+        do j = js, je - 1
+        do i = is, ie
+            CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
+        end do
+        end do
+
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is, ie
+            CS%eta(i, j) = CS%eta(i, j) - CS%dtbt*G%IareaT(i, j)* &
+                           ((CS%uhbt(i, j) - CS%uhbt(i - 1, j)) + (CS%vhbt(i, j) - CS%vhbt(i, j - 1)))
+        end do
+        end do
+
+        ! Accumulate time averages
+        !$acc parallel loop collapse(2)
+        do j = js, je
+        do i = is, ie - 1
+            CS%ubt_av(i, j) = CS%ubt_av(i, j) + CS%ubt(i, j)*inv_nstep
+        end do
+        end do
+        !$acc parallel loop collapse(2)
+        do j = js, je - 1
+        do i = is, ie
+            CS%vbt_av(i, j) = CS%vbt_av(i, j) + CS%vbt(i, j)*inv_nstep
+        end do
+        end do
+
+        !$acc end data
+
+    end subroutine btstep_do_step
+
+    !> Copy barotropic output from CS to output arrays (split API for MPI drivers).
+    !! Output arrays must already be present on GPU via OpenACC.
+    subroutine btstep_get_output(CS, G, u_av, v_av, eta_av)
+        type(barotropic_CS), intent(in) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed), intent(out) :: u_av, v_av, eta_av
+
+        integer :: i, j
+
+        !$acc data present(CS, G, u_av, v_av, eta_av)
+
+        !$acc parallel loop collapse(2)
+        do j = G%jsd, G%jed
+        do i = G%isd, G%ied
+            u_av(i, j) = CS%ubt_av(i, j)
+            v_av(i, j) = CS%vbt_av(i, j)
+            eta_av(i, j) = CS%eta(i, j)
+        end do
+        end do
+
+        !$acc end data
+
+    end subroutine btstep_get_output
 
 end module mom6_barotropic
