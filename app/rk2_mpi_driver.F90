@@ -9,7 +9,7 @@
 !!        If npes_x/npes_y omitted, auto-decomposed via MPI_Dims_create
 !!
 program rk2_mpi_driver
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
                           end_ocean_grid, G_EARTH, BT_cont_type, &

@@ -16,7 +16,7 @@
 !! pointer context with mpi_f08 descriptors).
 !!
 module mom6_mpi_halo
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64
     use mom6_mpi_domain, only: mpi_domain_type
     implicit none
@@ -114,8 +114,8 @@ contains
         integer :: nreqs, i, j, k, idx
         integer :: ierr
 
-        type(MPI_Request) :: reqs(16)
-        type(MPI_Status) :: stats(16)
+        integer :: reqs(16)
+        integer :: stats(MPI_STATUS_SIZE, 16)
 
         call check_gpu_aware_mpi()
 
@@ -306,7 +306,7 @@ contains
                                104, MD%comm, reqs(nreqs), ierr)
             end if
 
-            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
             !$acc end host_data
         else
@@ -321,7 +321,7 @@ contains
                 send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
                 send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
                 ew_size, ns_size, corner_size, 100)
-            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
             !$acc update device(recv_E(1:ew_size), recv_W(1:ew_size))
             !$acc update device(recv_N(1:ns_size), recv_S(1:ns_size))
@@ -440,8 +440,8 @@ contains
         integer :: nreqs, i, j, idx
         integer :: ierr
 
-        type(MPI_Request) :: reqs(16)
-        type(MPI_Status) :: stats(16)
+        integer :: reqs(16)
+        integer :: stats(MPI_STATUS_SIZE, 16)
 
         call check_gpu_aware_mpi()
 
@@ -613,7 +613,7 @@ contains
                                204, MD%comm, reqs(nreqs), ierr)
             end if
 
-            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
             !$acc end host_data
         else
@@ -627,7 +627,7 @@ contains
                 send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
                 send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
                 ew_size, ns_size, corner_size, 200)
-            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
             !$acc update device(recv_E(1:ew_size), recv_W(1:ew_size))
             !$acc update device(recv_N(1:ns_size), recv_S(1:ns_size))
@@ -743,7 +743,7 @@ contains
             send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
             ew_size, ns_size, corner_size, tag_base)
         type(mpi_domain_type), intent(in) :: MD
-        type(MPI_Request), intent(inout) :: reqs(:)
+        integer, intent(inout) :: reqs(:)
         integer, intent(inout) :: nreqs
         real(dp), intent(inout) :: send_E(*), recv_E(*), send_W(*), recv_W(*)
         real(dp), intent(inout) :: send_N(*), recv_N(*), send_S(*), recv_S(*)

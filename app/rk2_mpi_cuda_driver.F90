@@ -7,7 +7,7 @@
 !!
 program rk2_mpi_cuda_driver
     use cudafor
-    use mpi_f08
+    use mpi
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &

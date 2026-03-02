@@ -5,7 +5,7 @@
 !! Physics modules remain completely MPI-unaware.
 !!
 module mom6_mpi_domain
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, OMEGA
     implicit none
@@ -18,7 +18,7 @@ module mom6_mpi_domain
     !> MPI domain decomposition type
     type :: mpi_domain_type
         ! MPI communicator and topology
-        type(MPI_Comm) :: comm           ! Cartesian communicator
+        integer :: comm                   ! Cartesian communicator
         integer :: rank = 0              ! Rank in comm
         integer :: npes = 1              ! Total PEs
         integer :: npes_x = 1            ! PEs in x-direction

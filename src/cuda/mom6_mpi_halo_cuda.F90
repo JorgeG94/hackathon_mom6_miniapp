@@ -11,7 +11,7 @@
 !!
 module mom6_mpi_halo_cuda
     use cudafor
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64
     use mom6_mpi_domain, only: mpi_domain_type
     implicit none
@@ -151,8 +151,8 @@ contains
         integer :: nreqs, i, j, k, idx, istat
         integer :: ierr
 
-        type(MPI_Request) :: reqs(16)
-        type(MPI_Status) :: stats(16)
+        integer :: reqs(16)
+        integer :: stats(MPI_STATUS_SIZE, 16)
 
         call check_gpu_aware_mpi()
 
@@ -345,7 +345,7 @@ contains
             if (MD%sw /= MPI_PROC_NULL) then; nreqs=nreqs+1
                 call MPI_Isend(h_send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 304, MD%comm, reqs(nreqs), ierr); end if
         end if
-        if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+        if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
         if (.not. gpu_aware_mpi) then
             if (MD%east /= MPI_PROC_NULL) d_recv_E(1:ew_size) = h_recv_E(1:ew_size)
@@ -473,8 +473,8 @@ contains
         integer :: nreqs, i, j, idx, istat
         integer :: ierr
 
-        type(MPI_Request) :: reqs(16)
-        type(MPI_Status) :: stats(16)
+        integer :: reqs(16)
+        integer :: stats(MPI_STATUS_SIZE, 16)
 
         call check_gpu_aware_mpi()
 
@@ -638,7 +638,7 @@ contains
             if (MD%sw /= MPI_PROC_NULL) then; nreqs=nreqs+1
                 call MPI_Isend(h_send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 404, MD%comm, reqs(nreqs), ierr); end if
         end if
-        if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+        if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(:, 1:nreqs), ierr)
 
         if (.not. gpu_aware_mpi) then
             if (MD%east /= MPI_PROC_NULL) d_recv_E(1:ew_size) = h_recv_E(1:ew_size)

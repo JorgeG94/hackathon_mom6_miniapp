@@ -8,7 +8,7 @@
 !!        If npes_x/npes_y omitted, auto-decomposed via MPI_Dims_create
 !!
 program rk2_mpi_omp_driver
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64, int64
     use omp_lib, only: omp_set_default_device
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
