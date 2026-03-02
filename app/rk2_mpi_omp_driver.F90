@@ -1,16 +1,16 @@
-!> MPI-aware RK2 driver for MOM6 miniapps (OpenACC)
+!> MPI-aware RK2 driver for MOM6 miniapps (OpenMP target offloading)
 !!
-!! Based on rk2_driver.F90 with MPI domain decomposition and halo exchanges.
-!! Physics modules remain completely unmodified — all MPI logic is in
-!! the infrastructure modules (mom6_mpi_domain, mom6_mpi_halo).
+!! Based on rk2_mpi_driver.F90 (OpenACC) translated to OpenMP target.
+!! Physics modules use the _omp variants; halo exchange uses mom6_mpi_halo_omp.
 !!
-!! Usage: mpirun -np N rk2_mpi_driver ni nj nk niter bt_nsteps [npes_x npes_y]
+!! Usage: mpirun -np N rk2_mpi_omp_driver ni nj nk niter bt_nsteps [npes_x npes_y]
 !!        npes_x * npes_y must equal N
 !!        If npes_x/npes_y omitted, auto-decomposed via MPI_Dims_create
 !!
-program rk2_mpi_driver
+program rk2_mpi_omp_driver
     use mpi_f08
     use iso_fortran_env, only: dp => real64, int64
+    use omp_lib, only: omp_set_default_device
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
                           end_ocean_grid, G_EARTH, BT_cont_type, &
                           alloc_BT_cont_type, &
@@ -19,15 +19,15 @@ program rk2_mpi_driver
                           init_vertvisc_visc, end_vertvisc_visc
     use mom6_mpi_domain, only: mpi_domain_type, mpi_domain_init, &
                                mpi_domain_end, init_ocean_grid_mpi
-    use mom6_mpi_halo, only: halo_exchange_3d, halo_exchange_2d, halo_cleanup
-    use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
-    use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
+    use mom6_mpi_halo_omp, only: halo_exchange_3d, halo_exchange_2d, halo_cleanup
+    use mom6_continuity_omp, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
+    use mom6_coriolis_omp, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                              SADOURNY75_ENERGY
-    use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end, &
+    use mom6_barotropic_omp, only: barotropic_CS, barotropic_init, barotropic_end, &
                                btstep_init_state, btstep_do_step, btstep_get_output
-    use mom6_vert_visc, only: vert_visc_CS, vert_visc_init, &
+    use mom6_vert_visc_omp, only: vert_visc_CS, vert_visc_init, &
                               vert_visc_coef_apply, vert_visc_end
-    use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
+    use mom6_hor_visc_omp, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
     implicit none
@@ -90,7 +90,7 @@ program rk2_mpi_driver
 
     ! GPU device selection: assign GPUs round-robin by MPI rank
     call MPI_Comm_rank(MPI_COMM_WORLD, local_rank, ierr)
-    !$acc set device_num(local_rank)
+    !$ call omp_set_default_device(local_rank)
 
     ! Default parameters
     ni = 180; nj = 180; nk = 75; niter = 10; bt_nsteps = 30
@@ -136,7 +136,7 @@ program rk2_mpi_driver
 
     if (MD%rank == 0) then
         print '(A)', '=================================================='
-        print '(A)', 'MOM6 Split RK2 MPI Driver (OpenACC)'
+        print '(A)', 'MOM6 Split RK2 MPI Driver (OpenMP target)'
         print '(A)', '=================================================='
         print '(A,I5,A,I5,A,I4)', 'Global grid: ', ni, ' x ', nj, ' x ', nk
         print '(A,I4,A,I4,A,I4)', 'PE layout: ', npes_x, ' x ', npes_y, ' = ', nprocs
@@ -191,11 +191,11 @@ program rk2_mpi_driver
     call initialize_forces_visc_mpi(forces, visc, G, GV, MD)
 
     ! Copy all state arrays to GPU
-    !$acc enter data copyin(u, v, h, h0, uh, vh, eta, ubt, vbt)
-    !$acc enter data create(CAu, CAv, up, vp, diffu, diffv, htmp)
-    !$acc enter data create(ubt_av, vbt_av, eta_av)
-    !$acc update device(forces%taux, forces%tauy)
-    !$acc update device(visc%Ray_u, visc%Ray_v)
+    !$omp target enter data map(to: u, v, h, h0, uh, vh, eta, ubt, vbt)
+    !$omp target enter data map(alloc: CAu, CAv, up, vp, diffu, diffv, htmp)
+    !$omp target enter data map(alloc: ubt_av, vbt_av, eta_av)
+    !$omp target update to(forces%taux, forces%tauy)
+    !$omp target update to(visc%Ray_u, visc%Ray_v)
 
     ! Initial halo exchange to fill halos before first iteration
     call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
@@ -215,7 +215,7 @@ program rk2_mpi_driver
         print '(A,I5,A,I5)', 'Local compute domain: ', MD%ni_local, ' x ', MD%nj_local
         print '(A,F12.6,A)', 'Initialization time: ', t_init, ' s'
         print '(A)', ''
-        print '(A)', 'Running split RK2 time-stepping (MPI)...'
+        print '(A)', 'Running split RK2 time-stepping (MPI + OpenMP target)...'
         print '(A)', ''
     end if
 
@@ -235,7 +235,7 @@ program rk2_mpi_driver
             call system_clock(iter_clock_start, iter_clock_rate)
 
             ! Reset to initial state for timing consistency
-            !$acc parallel loop collapse(3) present(h, h0)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, nk
               do j = G%jsd, G%jed
                 do i = G%isd, G%ied
@@ -278,7 +278,7 @@ program rk2_mpi_driver
 
             ! 4. Predictor velocity update
             call profiler_start("VelUpdate_pred")
-            !$acc parallel loop collapse(3) present(u, up, CAu, diffu)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, nk
               do j = G%jsc, G%jec
                 do i = G%isc, G%iec - 1
@@ -286,7 +286,7 @@ program rk2_mpi_driver
                 end do
               end do
             end do
-            !$acc parallel loop collapse(3) present(v, vp, CAv, diffv)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, nk
               do j = G%jsc, G%jec - 1
                 do i = G%isc, G%iec
@@ -376,7 +376,7 @@ program rk2_mpi_driver
 
             ! 11. Final velocity update
             call profiler_start("VelUpdate_corr")
-            !$acc parallel loop collapse(3) present(u, CAu, diffu)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, nk
               do j = G%jsc, G%jec
                 do i = G%isc, G%iec - 1
@@ -384,7 +384,7 @@ program rk2_mpi_driver
                 end do
               end do
             end do
-            !$acc parallel loop collapse(3) present(v, CAv, diffv)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, nk
               do j = G%jsc, G%jec - 1
                 do i = G%isc, G%iec
@@ -422,7 +422,7 @@ program rk2_mpi_driver
             ! 14. Final continuity
             call profiler_start("Continuity")
             call system_clock(clock_start, clock_rate)
-            !$acc parallel loop collapse(3) present(h, htmp)
+            !$omp target teams distribute parallel do collapse(3)
             do k = 1, GV%ke
               do j = G%jsd, G%jed
                 do i = G%isd, G%ied
@@ -484,7 +484,7 @@ program rk2_mpi_driver
     end if
 
     ! Bring final state back to host for verification
-    !$acc update self(u, v, h, eta)
+    !$omp target update from(u, v, h, eta)
 
     ! MPI-aware verification (reduce across all PEs)
     call verify_state_mpi(h0, h, u, v, eta, G, GV, MD)
@@ -501,14 +501,14 @@ program rk2_mpi_driver
 
     call profiler_stop("Total")
     if (MD%rank == 0) then
-        call profiler_report("RK2 MPI Driver", root_region="Total")
+        call profiler_report("RK2 MPI OMP Driver", root_region="Total")
     end if
     call profiler_end()
 
     ! Release GPU memory for state arrays
-    !$acc exit data delete(u, v, h, h0, uh, vh, eta, ubt, vbt)
-    !$acc exit data delete(CAu, CAv, up, vp, diffu, diffv, htmp)
-    !$acc exit data delete(ubt_av, vbt_av, eta_av)
+    !$omp target exit data map(delete: u, v, h, h0, uh, vh, eta, ubt, vbt)
+    !$omp target exit data map(delete: CAu, CAv, up, vp, diffu, diffv, htmp)
+    !$omp target exit data map(delete: ubt_av, vbt_av, eta_av)
 
     deallocate(u, v, h, h0, uh, vh, CAu, CAv, up, vp)
     deallocate(diffu, diffv)
@@ -534,13 +534,9 @@ contains
         total_depth = 4000.0_dp
         halo = MD%halo
 
-        ! Use global indices for initial conditions to match single-GPU output
-        ! Local index i maps to global data index: i + i_offset
-        ! (because isc_local = halo+1 = 4, isc_global_single = 4, so offset is i_offset)
         do k = 1, GV%ke
           do j = G%jsd, G%jed
             do i = G%isd, G%ied
-              ! Global 1-based data-domain indices
               i_global = i + MD%i_offset
               j_global = j + MD%j_offset
 
@@ -616,7 +612,7 @@ contains
 
         integer :: i, j, k
 
-        !$acc parallel loop collapse(3) present(u, v, h, uh, vh, G)
+        !$omp target teams distribute parallel do collapse(3)
         do k = 1, GV%ke
           do j = G%jsd, G%jed
             do i = G%isd, G%ied
@@ -739,4 +735,4 @@ contains
         end if
     end subroutine check_bt_cfl
 
-end program rk2_mpi_driver
+end program rk2_mpi_omp_driver
