@@ -71,7 +71,7 @@ program hor_visc_cuda_driver
 
     ! Initialize CUDA control structure from precomputed metrics
     call hor_visc_init_cuda(CS_cuda, G%isd, G%ied, G%jsd, G%jed, &
-                            G%isc, G%iec, G%jsc, G%jec, &
+                            G%isc, G%iec, G%jsc, G%jec, nk, &
                             Kh_val, CS%h_neglect, &
                             CS%DY_dxT, CS%DX_dyT, CS%DY_dxBu, CS%DX_dyBu, &
                             G%IdyCu, G%IdxCu, G%IdyCv, G%IdxCv, &
