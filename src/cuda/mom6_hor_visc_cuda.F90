@@ -4,12 +4,12 @@
 !! attributes(global) CUDA kernels. Uses 3D kernels that parallelize over
 !! the vertical (k) direction via blockIdx%z, eliminating the host k-loop.
 !!
-!! Five 3D kernels:
-!!   1. vel_grad_kernel  -- velocity gradients (dudx, dvdy, dvdx, dudy)
-!!   2. strain_kernel    -- strain tensor (sh_xx, sh_xy) with free-slip BC
-!!   3. stress_xx_kernel -- diagonal stress str_xx at h-points
-!!   4. stress_xy_kernel -- off-diagonal stress str_xy at q-points
-!!   5. divergence_kernel-- viscous acceleration (diffu, diffv)
+!! Two fused 3D kernels:
+!!   1. stress_kernel    -- vel_grad + strain + stress (str_xx, str_xy)
+!!   2. divergence_kernel-- viscous acceleration (diffu, diffv)
+!!
+!! Intermediate arrays (dudx, dvdy, dvdx, dudy, sh_xx, sh_xy) are kept
+!! in registers and never written to global memory.
 !!
 !! 1-based local indexing, block size 32x4, k in blockIdx%z.
 !!
@@ -51,13 +51,7 @@ module mom6_hor_visc_cuda
         real(dp), device, allocatable :: dy2q_d(:,:)
         real(dp), device, allocatable :: dx2q_d(:,:)
 
-        ! Device 3D work arrays (one per layer)
-        real(dp), device, allocatable :: dudx_d(:,:,:)
-        real(dp), device, allocatable :: dvdy_d(:,:,:)
-        real(dp), device, allocatable :: dvdx_d(:,:,:)
-        real(dp), device, allocatable :: dudy_d(:,:,:)
-        real(dp), device, allocatable :: sh_xx_d(:,:,:)
-        real(dp), device, allocatable :: sh_xy_d(:,:,:)
+        ! Device 3D work arrays (stress tensors only; intermediates stay in registers)
         real(dp), device, allocatable :: str_xx_d(:,:,:)
         real(dp), device, allocatable :: str_xy_d(:,:,:)
     end type hor_visc_CS_cuda
@@ -83,22 +77,27 @@ contains
     ! k = blockIdx%z indexes the vertical layer.
     !=========================================================================
 
-    !> Kernel 1: Compute velocity gradients (3D)
-    !! dudx, dvdy at h-points (i in [Isq:Ieq+1], j in [Jsq:Jeq+1])
-    !! dvdx, dudy at q-points (I in [Isq:Ieq], J in [Jsq:Jeq])
-    attributes(global) subroutine vel_grad_kernel( &
-            dudx, dvdy, dvdx, dudy, &
-            u, v, &
+    !> Fused stress kernel: vel_grad + strain + stress in one pass (3D)
+    !! Computes str_xx at h-points and str_xy at q-points directly from
+    !! u, v, h. Intermediate values (dudx, dvdy, dvdx, dudy, sh_xx, sh_xy)
+    !! remain in registers and never touch global memory.
+    !!
+    !! str_xx range: i in [Isq:Ieq+1], j in [Jsq:Jeq+1]
+    !! str_xy range: I in [Isq:Ieq], J in [Jsq:Jeq]
+    attributes(global) subroutine stress_kernel( &
+            str_xx, str_xy, u, v, h, &
             DY_dxT, DX_dyT, DY_dxBu, DX_dyBu, &
             IdyCu, IdxCu, IdyCv, IdxCv, &
+            mask2dBu, reduction_xx, reduction_xy, &
+            Kh_bg, &
             n1, n2, n3, is_l, ie_l, js_l, je_l)
         integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
-        real(dp), intent(out) :: dudx(n1, n2, n3)
-        real(dp), intent(out) :: dvdy(n1, n2, n3)
-        real(dp), intent(out) :: dvdx(n1, n2, n3)
-        real(dp), intent(out) :: dudy(n1, n2, n3)
+        real(dp), value, intent(in) :: Kh_bg
+        real(dp), intent(out) :: str_xx(n1, n2, n3)
+        real(dp), intent(out) :: str_xy(n1, n2, n3)
         real(dp), intent(in) :: u(n1, n2, n3)
         real(dp), intent(in) :: v(n1, n2, n3)
+        real(dp), intent(in) :: h(n1, n2, n3)
         real(dp), intent(in) :: DY_dxT(n1, n2)
         real(dp), intent(in) :: DX_dyT(n1, n2)
         real(dp), intent(in) :: DY_dxBu(n1, n2)
@@ -107,141 +106,13 @@ contains
         real(dp), intent(in) :: IdxCu(n1, n2)
         real(dp), intent(in) :: IdyCv(n1, n2)
         real(dp), intent(in) :: IdxCv(n1, n2)
-
-        integer :: i, j, k
-        integer :: Isq_l, Ieq_l, Jsq_l, Jeq_l
-
-        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
-        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
-        k = blockIdx%z
-
-        if (i > n1 .or. j > n2 .or. k < 1 .or. k > n3) return
-
-        Isq_l = is_l - 1
-        Ieq_l = ie_l
-        Jsq_l = js_l - 1
-        Jeq_l = je_l
-
-        ! dudx, dvdy at h-points: i in [Isq:Ieq+1], j in [Jsq:Jeq+1]
-        if (i >= Isq_l .and. i <= Ieq_l + 1 .and. &
-            j >= Jsq_l .and. j <= Jeq_l + 1) then
-            dudx(i, j, k) = DY_dxT(i, j) * (IdyCu(i, j) * u(i, j, k) - &
-                                               IdyCu(i - 1, j) * u(i - 1, j, k))
-            dvdy(i, j, k) = DX_dyT(i, j) * (IdxCv(i, j) * v(i, j, k) - &
-                                               IdxCv(i, j - 1) * v(i, j - 1, k))
-        end if
-
-        ! dvdx, dudy at q-points: I in [Isq:Ieq], J in [Jsq:Jeq]
-        if (i >= Isq_l .and. i <= Ieq_l .and. &
-            j >= Jsq_l .and. j <= Jeq_l) then
-            dvdx(i, j, k) = DY_dxBu(i, j) * (v(i + 1, j, k) * IdyCv(i + 1, j) - &
-                                                v(i, j, k) * IdyCv(i, j))
-            dudy(i, j, k) = DX_dyBu(i, j) * (u(i, j + 1, k) * IdxCu(i, j + 1) - &
-                                                u(i, j, k) * IdxCu(i, j))
-        end if
-
-    end subroutine vel_grad_kernel
-
-    !> Kernel 2: Compute strain tensor (3D)
-    !! sh_xx at h-points (i in [Isq:Ieq+1], j in [Jsq:Jeq+1])
-    !! sh_xy at q-points (I in [Isq:Ieq], J in [Jsq:Jeq]) with free-slip BC
-    attributes(global) subroutine strain_kernel( &
-            sh_xx, sh_xy, &
-            dudx, dvdy, dvdx, dudy, &
-            mask2dBu, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-        integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
-        real(dp), intent(out) :: sh_xx(n1, n2, n3)
-        real(dp), intent(out) :: sh_xy(n1, n2, n3)
-        real(dp), intent(in) :: dudx(n1, n2, n3)
-        real(dp), intent(in) :: dvdy(n1, n2, n3)
-        real(dp), intent(in) :: dvdx(n1, n2, n3)
-        real(dp), intent(in) :: dudy(n1, n2, n3)
         real(dp), intent(in) :: mask2dBu(n1, n2)
-
-        integer :: i, j, k
-        integer :: Isq_l, Ieq_l, Jsq_l, Jeq_l
-
-        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
-        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
-        k = blockIdx%z
-
-        if (i > n1 .or. j > n2 .or. k < 1 .or. k > n3) return
-
-        Isq_l = is_l - 1
-        Ieq_l = ie_l
-        Jsq_l = js_l - 1
-        Jeq_l = je_l
-
-        ! sh_xx at h-points: i in [Isq:Ieq+1], j in [Jsq:Jeq+1]
-        if (i >= Isq_l .and. i <= Ieq_l + 1 .and. &
-            j >= Jsq_l .and. j <= Jeq_l + 1) then
-            sh_xx(i, j, k) = dudx(i, j, k) - dvdy(i, j, k)
-        end if
-
-        ! sh_xy at q-points: I in [Isq:Ieq], J in [Jsq:Jeq]
-        ! Free-slip BC: zero strain at boundaries (mask=0 means land)
-        if (i >= Isq_l .and. i <= Ieq_l .and. &
-            j >= Jsq_l .and. j <= Jeq_l) then
-            sh_xy(i, j, k) = mask2dBu(i, j) * (dvdx(i, j, k) + dudy(i, j, k))
-        end if
-
-    end subroutine strain_kernel
-
-    !> Kernel 3: Compute diagonal stress str_xx at h-points (3D)
-    !! str_xx = -Kh * sh_xx * h * reduction_xx
-    !! Range: i in [Isq:Ieq+1], j in [Jsq:Jeq+1]
-    attributes(global) subroutine stress_xx_kernel( &
-            str_xx, sh_xx, h, reduction_xx, &
-            Kh_bg, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-        integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
-        real(dp), value, intent(in) :: Kh_bg
-        real(dp), intent(out) :: str_xx(n1, n2, n3)
-        real(dp), intent(in) :: sh_xx(n1, n2, n3)
-        real(dp), intent(in) :: h(n1, n2, n3)
         real(dp), intent(in) :: reduction_xx(n1, n2)
-
-        integer :: i, j, k
-        integer :: Isq_l, Ieq_l, Jsq_l, Jeq_l
-
-        i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
-        j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
-        k = blockIdx%z
-
-        if (i > n1 .or. j > n2 .or. k < 1 .or. k > n3) return
-
-        Isq_l = is_l - 1
-        Ieq_l = ie_l
-        Jsq_l = js_l - 1
-        Jeq_l = je_l
-
-        if (i >= Isq_l .and. i <= Ieq_l + 1 .and. &
-            j >= Jsq_l .and. j <= Jeq_l + 1) then
-            str_xx(i, j, k) = -Kh_bg * sh_xx(i, j, k) * h(i, j, k) * reduction_xx(i, j)
-        end if
-
-    end subroutine stress_xx_kernel
-
-    !> Kernel 4: Compute off-diagonal stress str_xy at q-points (3D)
-    !! str_xy = -Kh * sh_xy * hq * mask2dBu * reduction_xy
-    !! hq = 0.25 * (h(i,j,k) + h(i+1,j+1,k) + h(i+1,j,k) + h(i,j+1,k))
-    !! Range: I in [Isq:Ieq], J in [Jsq:Jeq]
-    attributes(global) subroutine stress_xy_kernel( &
-            str_xy, sh_xy, h, mask2dBu, reduction_xy, &
-            Kh_bg, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-        integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
-        real(dp), value, intent(in) :: Kh_bg
-        real(dp), intent(out) :: str_xy(n1, n2, n3)
-        real(dp), intent(in) :: sh_xy(n1, n2, n3)
-        real(dp), intent(in) :: h(n1, n2, n3)
-        real(dp), intent(in) :: mask2dBu(n1, n2)
         real(dp), intent(in) :: reduction_xy(n1, n2)
 
         integer :: i, j, k
         integer :: Isq_l, Ieq_l, Jsq_l, Jeq_l
-        real(dp) :: hq_val
+        real(dp) :: dudx_l, dvdy_l, dvdx_l, dudy_l, sh_xx_l, sh_xy_l, hq_val
 
         i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
         j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
@@ -254,15 +125,32 @@ contains
         Jsq_l = js_l - 1
         Jeq_l = je_l
 
+        ! --- h-point: vel_grad -> strain -> str_xx (all in registers) ---
+        if (i >= Isq_l .and. i <= Ieq_l + 1 .and. &
+            j >= Jsq_l .and. j <= Jeq_l + 1) then
+            dudx_l = DY_dxT(i, j) * (IdyCu(i, j) * u(i, j, k) - &
+                                       IdyCu(i - 1, j) * u(i - 1, j, k))
+            dvdy_l = DX_dyT(i, j) * (IdxCv(i, j) * v(i, j, k) - &
+                                       IdxCv(i, j - 1) * v(i, j - 1, k))
+            sh_xx_l = dudx_l - dvdy_l
+            str_xx(i, j, k) = -Kh_bg * sh_xx_l * h(i, j, k) * reduction_xx(i, j)
+        end if
+
+        ! --- q-point: vel_grad -> strain -> str_xy (all in registers) ---
         if (i >= Isq_l .and. i <= Ieq_l .and. &
             j >= Jsq_l .and. j <= Jeq_l) then
+            dvdx_l = DY_dxBu(i, j) * (v(i + 1, j, k) * IdyCv(i + 1, j) - &
+                                        v(i, j, k) * IdyCv(i, j))
+            dudy_l = DX_dyBu(i, j) * (u(i, j + 1, k) * IdxCu(i, j + 1) - &
+                                        u(i, j, k) * IdxCu(i, j))
+            sh_xy_l = mask2dBu(i, j) * (dvdx_l + dudy_l)
             hq_val = 0.25_dp * ((h(i, j, k) + h(i + 1, j + 1, k)) + &
                                  (h(i + 1, j, k) + h(i, j + 1, k)))
-            str_xy(i, j, k) = -Kh_bg * sh_xy(i, j, k) * hq_val * &
+            str_xy(i, j, k) = -Kh_bg * sh_xy_l * hq_val * &
                                  mask2dBu(i, j) * reduction_xy(i, j)
         end if
 
-    end subroutine stress_xy_kernel
+    end subroutine stress_kernel
 
     !> Kernel 5: Compute viscous acceleration from stress divergence (3D)
     !! diffu at u-points (I in [Isq:Ieq], j in [js:je])
@@ -403,13 +291,7 @@ contains
         allocate(CS%dy2q_d(isd:ied, jsd:jed));       CS%dy2q_d = dy2q
         allocate(CS%dx2q_d(isd:ied, jsd:jed));       CS%dx2q_d = dx2q
 
-        ! Allocate 3D device work arrays (one entry per layer)
-        allocate(CS%dudx_d(isd:ied, jsd:jed, nz))
-        allocate(CS%dvdy_d(isd:ied, jsd:jed, nz))
-        allocate(CS%dvdx_d(isd:ied, jsd:jed, nz))
-        allocate(CS%dudy_d(isd:ied, jsd:jed, nz))
-        allocate(CS%sh_xx_d(isd:ied, jsd:jed, nz))
-        allocate(CS%sh_xy_d(isd:ied, jsd:jed, nz))
+        ! Allocate 3D device work arrays (stress tensors only)
         allocate(CS%str_xx_d(isd:ied, jsd:jed, nz))
         allocate(CS%str_xy_d(isd:ied, jsd:jed, nz))
 
@@ -418,7 +300,7 @@ contains
     end subroutine hor_visc_init_cuda
 
     !> Compute horizontal viscous accelerations on the GPU.
-    !! Launches 5 3D kernels covering all layers simultaneously.
+    !! Launches 2 fused 3D kernels covering all layers simultaneously.
     subroutine hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS, nz, bx_in, by_in)
         type(hor_visc_CS_cuda), intent(inout) :: CS
         integer, intent(in) :: nz
@@ -452,35 +334,16 @@ contains
         tBlock = dim3(bx, by, 1)
         grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), n3)
 
-        ! Kernel 1: Velocity gradients (all layers)
-        call vel_grad_kernel<<<grid, tBlock>>>( &
-            CS%dudx_d, CS%dvdy_d, CS%dvdx_d, CS%dudy_d, &
-            u_d, v_d, &
+        ! Kernel 1: Fused stress (vel_grad + strain + stress, all layers)
+        call stress_kernel<<<grid, tBlock>>>( &
+            CS%str_xx_d, CS%str_xy_d, u_d, v_d, h_d, &
             CS%DY_dxT_d, CS%DX_dyT_d, CS%DY_dxBu_d, CS%DX_dyBu_d, &
             CS%IdyCu_d, CS%IdxCu_d, CS%IdyCv_d, CS%IdxCv_d, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-
-        ! Kernel 2: Strain tensor (all layers)
-        call strain_kernel<<<grid, tBlock>>>( &
-            CS%sh_xx_d, CS%sh_xy_d, &
-            CS%dudx_d, CS%dvdy_d, CS%dvdx_d, CS%dudy_d, &
-            CS%mask2dBu_d, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-
-        ! Kernel 3: Diagonal stress at h-points (all layers)
-        call stress_xx_kernel<<<grid, tBlock>>>( &
-            CS%str_xx_d, CS%sh_xx_d, h_d, CS%reduction_xx_d, &
+            CS%mask2dBu_d, CS%reduction_xx_d, CS%reduction_xy_d, &
             CS%Kh_bg, &
             n1, n2, n3, is_l, ie_l, js_l, je_l)
 
-        ! Kernel 4: Off-diagonal stress at q-points (all layers)
-        call stress_xy_kernel<<<grid, tBlock>>>( &
-            CS%str_xy_d, CS%sh_xy_d, h_d, &
-            CS%mask2dBu_d, CS%reduction_xy_d, &
-            CS%Kh_bg, &
-            n1, n2, n3, is_l, ie_l, js_l, je_l)
-
-        ! Kernel 5: Stress divergence -> viscous acceleration (all layers)
+        ! Kernel 2: Stress divergence -> viscous acceleration (all layers)
         call divergence_kernel<<<grid, tBlock>>>( &
             diffu_d, diffv_d, &
             CS%str_xx_d, CS%str_xy_d, h_d, &
@@ -523,12 +386,6 @@ contains
         if (allocated(CS%dx2q_d)) deallocate(CS%dx2q_d)
 
         ! Deallocate device work arrays
-        if (allocated(CS%dudx_d)) deallocate(CS%dudx_d)
-        if (allocated(CS%dvdy_d)) deallocate(CS%dvdy_d)
-        if (allocated(CS%dvdx_d)) deallocate(CS%dvdx_d)
-        if (allocated(CS%dudy_d)) deallocate(CS%dudy_d)
-        if (allocated(CS%sh_xx_d)) deallocate(CS%sh_xx_d)
-        if (allocated(CS%sh_xy_d)) deallocate(CS%sh_xy_d)
         if (allocated(CS%str_xx_d)) deallocate(CS%str_xx_d)
         if (allocated(CS%str_xy_d)) deallocate(CS%str_xy_d)
 
