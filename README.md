@@ -16,6 +16,12 @@ cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran && cmake --build build
 # GPU with CUDA Fortran kernels
 cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_CUDA_KERNELS=ON && cmake --build build
 
+# MPI + OpenACC (multi-GPU)
+cmake -B build -DCMAKE_Fortran_COMPILER=mpif90 -DMOM6_ENABLE_MPI=ON && cmake --build build
+
+# MPI + CUDA Fortran (multi-GPU)
+cmake -B build -DCMAKE_Fortran_COMPILER=mpif90 -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_CUDA_KERNELS=ON && cmake --build build
+
 # Also build individual module drivers (continuity, coriolis, etc.)
 cmake -B build -DMOM6_ENABLE_MODULE_DRIVERS=ON && cmake --build build
 ```
@@ -25,16 +31,23 @@ cmake -B build -DMOM6_ENABLE_MODULE_DRIVERS=ON && cmake --build build
 | Option | Default | Description |
 |--------|---------|-------------|
 | `MOM6_ENABLE_CUDA_KERNELS` | OFF | Build CUDA Fortran kernel variants (requires nvfortran) |
+| `MOM6_ENABLE_MPI` | OFF | Build MPI-parallel drivers for multi-GPU/multi-node (requires MPI Fortran) |
 | `MOM6_ENABLE_MODULE_DRIVERS` | OFF | Build individual module drivers |
 
 ### Make
 
 ```bash
-make FC=nvfortran GPU=yes           # GPU (nvfortran)
-make FC=nvfortran GPU=yes NVTX=yes  # GPU with NVTX profiling
-make FC=gfortran GPU=no             # CPU (gfortran)
-make FC=ifx GPU=no                  # CPU (Intel)
-make DISABLE_PROFILER=yes           # Zero-overhead profiler
+# Single GPU
+make FC=nvfortran                   # OpenACC
+make cuda FC=nvfortran              # CUDA Fortran
+
+# Multi-GPU (MPI) — requires: source env.sh
+make mpi FC=nvfortran               # OpenACC + MPI
+make mpi-cuda FC=nvfortran          # CUDA Fortran + MPI
+
+# CPU
+make FC=gfortran                    # gfortran
+make FC=ifx                         # Intel
 ```
 
 ### Fortran Package Manager
@@ -62,6 +75,39 @@ fpm install --prefix . --compiler nvfortran --flag "-O3 -acc=multicore,gpu -gpu=
 - `niter`: Outer iterations for timing
 - `bt_nsteps`: Barotropic substeps per iteration (typically 30–100)
 - `diag`: Diagnostics mode (0=disabled, 1=enabled; default 0)
+
+### MPI Drivers (multi-GPU)
+
+```bash
+mpirun -np N ./rk2_mpi_driver ni nj nk niter bt_nsteps [npes_x npes_y]
+mpirun -np N ./rk2_mpi_cuda_driver ni nj nk niter bt_nsteps [npes_x npes_y]
+
+# Examples
+mpirun -np 4 ./rk2_mpi_driver 180 180 75 10 30           # 4 GPUs, auto layout
+mpirun -np 4 ./rk2_mpi_cuda_driver 360 360 75 10 30      # CUDA, 4 GPUs
+mpirun -np 6 ./rk2_mpi_driver 360 360 75 10 30 3 2       # 3x2 PE layout
+
+# Multi-node
+mpirun -np 8 --npernode 4 ./rk2_mpi_cuda_driver 720 720 75 10 30
+```
+
+**Additional parameters:**
+- `npes_x`, `npes_y`: PE layout (optional). If omitted, `MPI_Dims_create` auto-decomposes.
+  `npes_x * npes_y` must equal the number of MPI ranks.
+
+### GPU-Aware MPI
+
+By default, halo exchanges use host staging (GPU→host→MPI→host→GPU). To enable GPU-aware MPI, which passes device pointers directly to MPI and eliminates the intermediate memory copies, set the environment variable:
+
+```bash
+export MOM6_GPU_AWARE_MPI=1
+mpirun -np 4 ./rk2_mpi_cuda_driver 360 360 75 10 30
+```
+
+This requires an MPI library built with CUDA support (e.g., OpenMPI+UCX or MVAPICH2-GDR). A diagnostic message is printed at startup confirming which path is active:
+```
+[MPI Halo CUDA] GPU-aware MPI: ENABLED
+```
 
 ### Module Drivers (with `-DMOM6_ENABLE_MODULE_DRIVERS=ON`)
 
@@ -224,7 +270,9 @@ hackathon_mom6_miniapp/
 │   ├── common/
 │   │   ├── mom6_types.F90              # Grid types and constants
 │   │   ├── mom6_profiler.F90           # Portable profiler with NVTX
-│   │   └── mom6_diag.F90              # Simplified diagnostics
+│   │   ├── mom6_diag.F90              # Simplified diagnostics
+│   │   ├── mom6_mpi_domain.F90        # MPI domain decomposition (2D Cartesian)
+│   │   └── mom6_mpi_halo.F90         # OpenACC halo exchange (GPU-aware or host-staging)
 │   ├── openacc/
 │   │   ├── mom6_continuity.F90        # PPM continuity solver
 │   │   ├── mom6_continuity_adjust.F90 # Continuity flux adjustment
@@ -237,15 +285,14 @@ hackathon_mom6_miniapp/
 │       ├── mom6_coriolis_cuda.F90     # CUDA Fortran Coriolis
 │       ├── mom6_barotropic_cuda.F90   # CUDA Fortran barotropic
 │       ├── mom6_vert_visc_cuda.F90    # CUDA Fortran vertical viscosity
-│       └── mom6_hor_visc_cuda.F90     # CUDA Fortran horizontal viscosity
+│       ├── mom6_hor_visc_cuda.F90     # CUDA Fortran horizontal viscosity
+│       └── mom6_mpi_halo_cuda.F90    # CUDA halo exchange (GPU-aware or host-staging)
 ├── app/
-│   ├── rk2_driver.F90                 # Unified RK2 driver (main)
-│   ├── rk2_cuda_driver.F90            # CUDA RK2 driver
-│   ├── continuity_driver.F90          # Module drivers
-│   ├── coriolis_driver.F90            #   (built with
-│   ├── barotropic_driver.F90          #    MOM6_ENABLE_MODULE_DRIVERS)
-│   ├── vert_visc_driver.F90           #
-│   └── hor_visc_driver.F90            #
+│   ├── rk2_driver.F90                 # OpenACC RK2 driver (single GPU)
+│   ├── rk2_cuda_driver.F90            # CUDA RK2 driver (single GPU)
+│   ├── rk2_mpi_driver.F90            # MPI + OpenACC RK2 driver (multi-GPU)
+│   ├── rk2_mpi_cuda_driver.F90       # MPI + CUDA RK2 driver (multi-GPU)
+│   └── module_drivers/               # Individual module drivers
 ├── CMakeLists.txt
 ├── Makefile
 └── fpm.toml
@@ -262,5 +309,8 @@ mom6_types.F90
     ├── mom6_coriolis.F90
     ├── mom6_barotropic.F90
     ├── mom6_vert_visc.F90
-    └── mom6_hor_visc.F90
+    ├── mom6_hor_visc.F90
+    └── mom6_mpi_domain.F90          # MPI only
+        ├── mom6_mpi_halo.F90        # OpenACC halo exchange
+        └── mom6_mpi_halo_cuda.F90   # CUDA halo exchange
 ```

@@ -1,12 +1,14 @@
-!> MOM6 Barotropic Solver Module
+!> MOM6 Barotropic Solver Module (OpenMP target offloading)
 !!
 !! Fast barotropic (depth-averaged) solver with sub-stepping.
 !! Solves the linearized shallow water equations for free surface and
 !! depth-averaged velocities.
 !!
+!! Translated from OpenACC (mom6_barotropic) to OpenMP target offloading.
+!!
 !! Original code from: src/core/MOM_barotropic.F90
 !!
-module mom6_barotropic
+module mom6_barotropic_omp
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, G_EARTH
     implicit none
@@ -140,14 +142,14 @@ contains
         CS%initialized = .true.
 
         ! Copy CS structure and pre-computed arrays to GPU
-        !$acc enter data copyin(CS)
-        !$acc enter data copyin(CS%Datu, CS%Datv)
-        !$acc enter data copyin(CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
-        !$acc enter data copyin(CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
+        !$omp target enter data map(to: CS)
+        !$omp target enter data map(to: CS%Datu, CS%Datv)
+        !$omp target enter data map(to: CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
+        !$omp target enter data map(to: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
         ! Create device-side storage for state/work arrays (overwritten in btstep)
-        !$acc enter data create(CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
-        !$acc enter data create(CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
-        !$acc enter data create(CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+        !$omp target enter data map(alloc: CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
+        !$omp target enter data map(alloc: CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
+        !$omp target enter data map(alloc: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
 
     end subroutine barotropic_init
 
@@ -158,12 +160,12 @@ contains
         if (.not. CS%initialized) return
 
         ! Remove all CS arrays from device before deallocating
-        !$acc exit data delete(CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
-        !$acc exit data delete(CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
-        !$acc exit data delete(CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
-        !$acc exit data delete(CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
-        !$acc exit data delete(CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
-        !$acc exit data delete(CS)
+        !$omp target exit data map(delete: CS%eta, CS%ubt, CS%vbt, CS%eta_pred, CS%ubt_prev, CS%vbt_prev)
+        !$omp target exit data map(delete: CS%uhbt, CS%vhbt, CS%PFu, CS%PFv, CS%Cor_u, CS%Cor_v)
+        !$omp target exit data map(delete: CS%Datu, CS%Datv, CS%gtot_E, CS%gtot_W, CS%gtot_N, CS%gtot_S)
+        !$omp target exit data map(delete: CS%f_4_u, CS%f_4_v, CS%bt_rem_u, CS%bt_rem_v)
+        !$omp target exit data map(delete: CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av)
+        !$omp target exit data map(delete: CS)
 
         if (allocated(CS%eta)) deallocate (CS%eta)
         if (allocated(CS%eta_pred)) deallocate (CS%eta_pred)
@@ -218,10 +220,10 @@ contains
         trans_wt2 = -CS%bebt
         inv_nstep = 1.0_dp/real(CS%nstep, dp)
 
-        !$acc data copyin(eta_in, ubt_in, vbt_in) copyout(u_av, v_av, eta_av) present(CS, G)
+        !$omp target data map(to: eta_in, ubt_in, vbt_in) map(from: u_av, v_av, eta_av)
 
         ! Initialize from input
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=G%jsd,G%jed
         do i=G%isd,G%ied
             CS%eta(i, j) = eta_in(i, j)
@@ -236,13 +238,13 @@ contains
         do n = 1, CS%nstep
 
             ! Store previous velocities
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is - 1,ie + 1
                 CS%ubt_prev(i, j) = CS%ubt(i, j)
             end do
             end do
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js - 1,je + 1
             do i=is,ie
                 CS%vbt_prev(i, j) = CS%vbt(i, j)
@@ -250,7 +252,7 @@ contains
             end do
 
             ! Eta predictor
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is,ie
                 CS%eta_pred(i, j) = CS%eta(i, j) + (CS%dtbt*G%IareaT(i, j))* &
@@ -260,7 +262,7 @@ contains
             end do
 
             ! Pressure force
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is,ie - 1
                 CS%PFu(i, j) = ((CS%eta_pred(i, j)*CS%gtot_E(i, j)) - &
@@ -268,7 +270,7 @@ contains
                                CS%dgeo_de*G%IdxCu(i, j)
             end do
             end do
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je - 1
             do i=is,ie
                 CS%PFv(i, j) = ((CS%eta_pred(i, j)*CS%gtot_N(i, j)) - &
@@ -291,20 +293,20 @@ contains
             end if
 
             ! Compute transports (extended range for MPI boundary correctness)
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is - 1,ie
                 CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
             end do
             end do
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js - 1,je
             do i=is,ie
                 CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
             end do
             end do
 
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is,ie
                 CS%eta(i, j) = CS%eta(i, j) - CS%dtbt*G%IareaT(i, j)* &
@@ -313,13 +315,13 @@ contains
             end do
 
             ! Accumulate time averages
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je
             do i=is,ie - 1
                 CS%ubt_av(i, j) = CS%ubt_av(i, j) + CS%ubt(i, j)*inv_nstep
             end do
             end do
-            !$acc parallel loop collapse(2)
+            !$omp target teams distribute parallel do collapse(2)
             do j=js,je - 1
             do i=is,ie
                 CS%vbt_av(i, j) = CS%vbt_av(i, j) + CS%vbt(i, j)*inv_nstep
@@ -329,7 +331,7 @@ contains
         end do  ! substep loop
 
         ! Copy output
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=G%jsd,G%jed
         do i=G%isd,G%ied
             u_av(i, j) = CS%ubt_av(i, j)
@@ -338,7 +340,7 @@ contains
         end do
         end do
 
-        !$acc end data
+        !$omp end target data
 
     end subroutine btstep
 
@@ -350,10 +352,8 @@ contains
 
         integer :: i, j
 
-        !$acc data present(CS, G)
-
         ! Coriolis for u
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=js,je
         do i=is,ie
             CS%Cor_u(i, j) = (((CS%f_4_u(4, i, j)*CS%vbt(i + 1, j)) + (CS%f_4_u(1, i, j)*CS%vbt(i, j - 1))) + &
@@ -362,15 +362,13 @@ contains
         end do
 
         ! Update u
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=js,je
         do i=is,ie
             CS%ubt(i, j) = CS%bt_rem_u(i, j)*(CS%ubt(i, j) + &
                                               CS%dtbt*(CS%Cor_u(i, j) + CS%PFu(i, j)))
         end do
         end do
-
-        !$acc end data
 
     end subroutine update_u
 
@@ -382,10 +380,8 @@ contains
 
         integer :: i, j
 
-        !$acc data present(CS, G)
-
         ! Coriolis for v
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=js,je
         do i=is,ie
             CS%Cor_v(i, j) = -1.0_dp*(((CS%f_4_v(1, i, j)*CS%ubt(i - 1, j)) + (CS%f_4_v(4, i, j)*CS%ubt(i, j + 1))) + &
@@ -394,7 +390,7 @@ contains
         end do
 
         ! Update v
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j=js,je
         do i=is,ie
             CS%vbt(i, j) = CS%bt_rem_v(i, j)*(CS%vbt(i, j) + &
@@ -402,12 +398,10 @@ contains
         end do
         end do
 
-        !$acc end data
-
     end subroutine update_v
 
     !> Initialize barotropic state from input arrays (split API for MPI drivers).
-    !! Input arrays must already be present on GPU via OpenACC.
+    !! Input arrays must already be present on GPU via OpenMP target.
     subroutine btstep_init_state(CS, G, eta_in, ubt_in, vbt_in)
         type(barotropic_CS), intent(inout) :: CS
         type(ocean_grid_type), intent(in) :: G
@@ -415,9 +409,7 @@ contains
 
         integer :: i, j
 
-        !$acc data present(CS, G, eta_in, ubt_in, vbt_in)
-
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = G%jsd, G%jed
         do i = G%isd, G%ied
             CS%eta(i, j) = eta_in(i, j)
@@ -427,8 +419,6 @@ contains
             CS%vbt_av(i, j) = 0.0_dp
         end do
         end do
-
-        !$acc end data
 
     end subroutine btstep_init_state
 
@@ -449,16 +439,14 @@ contains
         trans_wt2 = -CS%bebt
         inv_nstep = 1.0_dp / real(CS%nstep, dp)
 
-        !$acc data present(CS, G)
-
         ! Store previous velocities
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is - 1, ie + 1
             CS%ubt_prev(i, j) = CS%ubt(i, j)
         end do
         end do
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js - 1, je + 1
         do i = is, ie
             CS%vbt_prev(i, j) = CS%vbt(i, j)
@@ -466,7 +454,7 @@ contains
         end do
 
         ! Eta predictor
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is, ie
             CS%eta_pred(i, j) = CS%eta(i, j) + (CS%dtbt*G%IareaT(i, j))* &
@@ -476,7 +464,7 @@ contains
         end do
 
         ! Pressure force
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is, ie - 1
             CS%PFu(i, j) = ((CS%eta_pred(i, j)*CS%gtot_E(i, j)) - &
@@ -484,7 +472,7 @@ contains
                            CS%dgeo_de*G%IdxCu(i, j)
         end do
         end do
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je - 1
         do i = is, ie
             CS%PFv(i, j) = ((CS%eta_pred(i, j)*CS%gtot_N(i, j)) - &
@@ -505,20 +493,20 @@ contains
         end if
 
         ! Compute transports (extended range for MPI boundary correctness)
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is - 1, ie
             CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
         end do
         end do
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js - 1, je
         do i = is, ie
             CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
         end do
         end do
 
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is, ie
             CS%eta(i, j) = CS%eta(i, j) - CS%dtbt*G%IareaT(i, j)* &
@@ -527,25 +515,23 @@ contains
         end do
 
         ! Accumulate time averages
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je
         do i = is, ie - 1
             CS%ubt_av(i, j) = CS%ubt_av(i, j) + CS%ubt(i, j)*inv_nstep
         end do
         end do
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = js, je - 1
         do i = is, ie
             CS%vbt_av(i, j) = CS%vbt_av(i, j) + CS%vbt(i, j)*inv_nstep
         end do
         end do
 
-        !$acc end data
-
     end subroutine btstep_do_step
 
     !> Copy barotropic output from CS to output arrays (split API for MPI drivers).
-    !! Output arrays must already be present on GPU via OpenACC.
+    !! Output arrays must already be present on GPU via OpenMP target.
     subroutine btstep_get_output(CS, G, u_av, v_av, eta_av)
         type(barotropic_CS), intent(in) :: CS
         type(ocean_grid_type), intent(in) :: G
@@ -553,9 +539,7 @@ contains
 
         integer :: i, j
 
-        !$acc data present(CS, G, u_av, v_av, eta_av)
-
-        !$acc parallel loop collapse(2)
+        !$omp target teams distribute parallel do collapse(2)
         do j = G%jsd, G%jed
         do i = G%isd, G%ied
             u_av(i, j) = CS%ubt_av(i, j)
@@ -564,8 +548,6 @@ contains
         end do
         end do
 
-        !$acc end data
-
     end subroutine btstep_get_output
 
-end module mom6_barotropic
+end module mom6_barotropic_omp

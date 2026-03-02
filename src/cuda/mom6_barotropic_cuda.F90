@@ -11,6 +11,7 @@ module mom6_barotropic_cuda
     private
 
     public :: btstep_cuda, barotropic_init_cuda, barotropic_end_cuda
+    public :: btstep_cuda_init_state, btstep_cuda_do_step, btstep_cuda_get_output
     public :: barotropic_CS_cuda
 
     !> Control structure for CUDA Fortran barotropic solver
@@ -304,13 +305,15 @@ contains
 
         if (i > n1 .or. j > n2) return
 
-        ! Compute u-transport: i in [is_l-1 : ie_l-1], j in [js_l : je_l]
-        if (i >= is_l - 1 .and. i <= ie_l - 1 .and. j >= js_l .and. j <= je_l) then
+        ! Compute u-transport: i in [is_l-1 : ie_l], j in [js_l : je_l]
+        ! Extended range for MPI boundary correctness
+        if (i >= is_l - 1 .and. i <= ie_l .and. j >= js_l .and. j <= je_l) then
             uhbt(i, j) = Datu(i, j) * (trans_wt1 * ubt(i, j) + trans_wt2 * ubt_prev(i, j))
         end if
 
-        ! Compute v-transport: i in [is_l : ie_l], j in [js_l-1 : je_l-1]
-        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l - 1) then
+        ! Compute v-transport: i in [is_l : ie_l], j in [js_l-1 : je_l]
+        ! Extended range for MPI boundary correctness
+        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l) then
             vhbt(i, j) = Datv(i, j) * (trans_wt1 * vbt(i, j) + trans_wt2 * vbt_prev(i, j))
         end if
 
@@ -325,13 +328,13 @@ contains
         ! averages alongside the transport computation.
 
         ! Accumulate u time averages: same range as uhbt
-        if (i >= is_l - 1 .and. i <= ie_l - 1 .and. j >= js_l .and. j <= je_l) then
+        if (i >= is_l - 1 .and. i <= ie_l .and. j >= js_l .and. j <= je_l) then
             ubt_av(i, j) = ubt_av(i, j) + ubt(i, j) * inv_nstep
             uhbt_av(i, j) = uhbt_av(i, j) + uhbt(i, j) * inv_nstep
         end if
 
         ! Accumulate v time averages: same range as vhbt
-        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l - 1) then
+        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l) then
             vbt_av(i, j) = vbt_av(i, j) + vbt(i, j) * inv_nstep
             vhbt_av(i, j) = vhbt_av(i, j) + vhbt(i, j) * inv_nstep
         end if
@@ -633,5 +636,152 @@ contains
         CS%initialized = .false.
 
     end subroutine barotropic_end_cuda
+
+    !> Initialize CUDA barotropic state from input device arrays (split API for MPI drivers).
+    subroutine btstep_cuda_init_state(CS, eta_in_d, ubt_in_d, vbt_in_d, bx_in, by_in)
+        type(barotropic_CS_cuda), intent(inout) :: CS
+        real(dp), device, intent(in) :: eta_in_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        real(dp), device, intent(in) :: ubt_in_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        real(dp), device, intent(in) :: vbt_in_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        integer, intent(in), optional :: bx_in, by_in
+
+        integer :: n1, n2, bx, by
+        type(dim3) :: grid, tBlock
+
+        bx = 32; by = 4
+        if (present(bx_in)) bx = bx_in
+        if (present(by_in)) by = by_in
+
+        n1 = CS%ied - CS%isd + 1
+        n2 = CS%jed - CS%jsd + 1
+        tBlock = dim3(bx, by, 1)
+        grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), 1)
+
+        call bt_init_kernel<<<grid, tBlock>>>( &
+            CS%eta, CS%ubt, CS%vbt, CS%ubt_av, CS%vbt_av, CS%uhbt_av, CS%vhbt_av, &
+            eta_in_d, ubt_in_d, vbt_in_d, &
+            n1, n2)
+
+    end subroutine btstep_cuda_init_state
+
+    !> Execute one CUDA barotropic substep (split API for MPI drivers).
+    subroutine btstep_cuda_do_step(CS, n, bx_in, by_in)
+        type(barotropic_CS_cuda), intent(inout) :: CS
+        integer, intent(in) :: n  ! substep number (1-based)
+        integer, intent(in), optional :: bx_in, by_in
+
+        integer :: n1, n2, is_l, ie_l, js_l, je_l, bx, by
+        real(dp) :: trans_wt1, trans_wt2, inv_nstep
+        logical :: v_first
+        type(dim3) :: grid, tBlock
+
+        bx = 32; by = 4
+        if (present(bx_in)) bx = bx_in
+        if (present(by_in)) by = by_in
+
+        n1 = CS%ied - CS%isd + 1
+        n2 = CS%jed - CS%jsd + 1
+
+        is_l = CS%is - CS%isd + 1
+        ie_l = CS%ie - CS%isd + 1
+        js_l = CS%js - CS%jsd + 1
+        je_l = CS%je - CS%jsd + 1
+
+        tBlock = dim3(bx, by, 1)
+        grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), 1)
+
+        trans_wt1 = 1.0_dp + CS%bebt
+        trans_wt2 = -CS%bebt
+        inv_nstep = 1.0_dp / real(CS%nstep, dp)
+
+        ! Store previous velocities
+        call bt_store_prev_u_kernel<<<grid, tBlock>>>( &
+            CS%ubt_prev, CS%ubt, &
+            n1, n2, is_l, ie_l, js_l, je_l)
+
+        call bt_store_prev_v_kernel<<<grid, tBlock>>>( &
+            CS%vbt_prev, CS%vbt, &
+            n1, n2, is_l, ie_l, js_l, je_l)
+
+        ! Eta predictor
+        call bt_eta_pred_kernel<<<grid, tBlock>>>( &
+            CS%eta_pred, CS%eta, CS%ubt, CS%vbt, &
+            CS%Datu, CS%Datv, CS%IareaT_d, &
+            n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+
+        ! Pressure forces
+        call bt_pressure_force_u_kernel<<<grid, tBlock>>>( &
+            CS%PFu, CS%eta_pred, CS%gtot_E, CS%gtot_W, CS%IdxCu_d, &
+            n1, n2, is_l, ie_l, js_l, je_l, CS%dgeo_de)
+
+        call bt_pressure_force_v_kernel<<<grid, tBlock>>>( &
+            CS%PFv, CS%eta_pred, CS%gtot_N, CS%gtot_S, CS%IdyCv_d, &
+            n1, n2, is_l, ie_l, js_l, je_l, CS%dgeo_de)
+
+        ! Alternating u/v Coriolis update order
+        v_first = (mod(n + CS%first_direction, 2) == 1)
+
+        if (v_first) then
+            call bt_coriolis_update_v_kernel<<<grid, tBlock>>>( &
+                CS%vbt, CS%Cor_v, CS%ubt, CS%PFv, CS%f_4_v, CS%bt_rem_v, &
+                n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+
+            call bt_coriolis_update_u_kernel<<<grid, tBlock>>>( &
+                CS%ubt, CS%Cor_u, CS%vbt, CS%PFu, CS%f_4_u, CS%bt_rem_u, &
+                n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+        else
+            call bt_coriolis_update_u_kernel<<<grid, tBlock>>>( &
+                CS%ubt, CS%Cor_u, CS%vbt, CS%PFu, CS%f_4_u, CS%bt_rem_u, &
+                n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+
+            call bt_coriolis_update_v_kernel<<<grid, tBlock>>>( &
+                CS%vbt, CS%Cor_v, CS%ubt, CS%PFv, CS%f_4_v, CS%bt_rem_v, &
+                n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+        end if
+
+        ! Compute transports and accumulate time averages
+        call bt_transport_eta_accum_kernel<<<grid, tBlock>>>( &
+            CS%uhbt, CS%vhbt, CS%eta, CS%ubt_av, CS%vbt_av, &
+            CS%uhbt_av, CS%vhbt_av, &
+            CS%ubt, CS%vbt, CS%ubt_prev, CS%vbt_prev, &
+            CS%Datu, CS%Datv, CS%IareaT_d, &
+            n1, n2, is_l, ie_l, js_l, je_l, &
+            CS%dtbt, trans_wt1, trans_wt2, inv_nstep)
+
+        ! Update eta from transport divergence
+        call bt_eta_update_kernel<<<grid, tBlock>>>( &
+            CS%eta, CS%uhbt, CS%vhbt, CS%IareaT_d, &
+            n1, n2, is_l, ie_l, js_l, je_l, CS%dtbt)
+
+    end subroutine btstep_cuda_do_step
+
+    !> Copy CUDA barotropic output from CS to output device arrays (split API for MPI drivers).
+    subroutine btstep_cuda_get_output(CS, u_av_d, v_av_d, eta_av_d, bx_in, by_in)
+        type(barotropic_CS_cuda), intent(inout) :: CS
+        real(dp), device, intent(out) :: u_av_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        real(dp), device, intent(out) :: v_av_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        real(dp), device, intent(out) :: eta_av_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        integer, intent(in), optional :: bx_in, by_in
+
+        integer :: n1, n2, bx, by, istat
+        type(dim3) :: grid, tBlock
+
+        bx = 32; by = 4
+        if (present(bx_in)) bx = bx_in
+        if (present(by_in)) by = by_in
+
+        n1 = CS%ied - CS%isd + 1
+        n2 = CS%jed - CS%jsd + 1
+        tBlock = dim3(bx, by, 1)
+        grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), 1)
+
+        call bt_copy_output_kernel<<<grid, tBlock>>>( &
+            u_av_d, v_av_d, eta_av_d, &
+            CS%ubt_av, CS%vbt_av, CS%eta, &
+            n1, n2)
+
+        istat = cudaDeviceSynchronize()
+
+    end subroutine btstep_cuda_get_output
 
 end module mom6_barotropic_cuda
