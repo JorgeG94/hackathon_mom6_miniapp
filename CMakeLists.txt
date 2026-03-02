@@ -86,7 +86,7 @@ if(MOM6_ENABLE_MODULE_DRIVERS)
     vert_visc_driver hor_visc_driver)
 
   foreach(drv ${MODULE_DRIVERS})
-    add_executable(${drv} app/${drv}.F90)
+    add_executable(${drv} app/module_drivers/${drv}.F90)
     target_link_libraries(${drv} PRIVATE mom6_modules)
   endforeach()
 
@@ -116,7 +116,7 @@ if(MOM6_ENABLE_CUDA_KERNELS)
       vert_visc_cuda_driver hor_visc_cuda_driver)
 
     foreach(drv ${MODULE_CUDA_DRIVERS})
-      add_cuda_driver(${drv} app/${drv}.F90)
+      add_cuda_driver(${drv} app/module_drivers/${drv}.F90)
     endforeach()
   endif()
 endif()
