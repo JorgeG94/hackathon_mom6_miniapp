@@ -44,6 +44,7 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # =============================================================================
 
 option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
 
 if(MOM6_ENABLE_CUDA_KERNELS)
   if(NOT CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
@@ -122,6 +123,49 @@ if(MOM6_ENABLE_CUDA_KERNELS)
 endif()
 
 # =============================================================================
+# MPI modules and drivers (opt-in)
+# =============================================================================
+
+if(MOM6_ENABLE_MPI)
+  find_package(MPI REQUIRED COMPONENTS Fortran)
+  message(STATUS "MPI Fortran: ENABLED (${MPI_Fortran_COMPILER})")
+
+  # MPI infrastructure library (domain decomposition + halo exchange)
+  add_library(mom6_mpi_modules STATIC
+    src/common/mom6_mpi_domain.F90
+    src/common/mom6_mpi_halo.F90)
+
+  set_target_properties(mom6_mpi_modules PROPERTIES
+    Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod)
+  target_include_directories(mom6_mpi_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
+  target_link_libraries(mom6_mpi_modules PUBLIC mom6_modules MPI::MPI_Fortran)
+
+  # OpenACC MPI driver
+  add_executable(rk2_mpi_driver app/rk2_mpi_driver.F90)
+  target_link_libraries(rk2_mpi_driver PRIVATE mom6_modules mom6_mpi_modules MPI::MPI_Fortran)
+
+  # CUDA MPI (requires both MPI and CUDA enabled)
+  if(MOM6_ENABLE_CUDA_KERNELS)
+    # CUDA MPI halo exchange library
+    add_library(mom6_mpi_cuda_modules STATIC
+      src/cuda/mom6_mpi_halo_cuda.F90)
+
+    set_target_properties(mom6_mpi_cuda_modules PROPERTIES
+      Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod)
+    target_include_directories(mom6_mpi_cuda_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
+    target_compile_options(mom6_mpi_cuda_modules PRIVATE "-cuda")
+    target_link_libraries(mom6_mpi_cuda_modules PUBLIC mom6_mpi_modules MPI::MPI_Fortran)
+
+    # CUDA MPI driver
+    add_executable(rk2_mpi_cuda_driver app/rk2_mpi_cuda_driver.F90)
+    target_link_libraries(rk2_mpi_cuda_driver PRIVATE
+      mom6_modules mom6_cuda_kernels mom6_mpi_modules mom6_mpi_cuda_modules MPI::MPI_Fortran)
+    target_compile_options(rk2_mpi_cuda_driver PRIVATE "-cuda")
+    target_link_options(rk2_mpi_cuda_driver PRIVATE "-cuda" "-cudalib=nvtx")
+  endif()
+endif()
+
+# =============================================================================
 # Installation
 # =============================================================================
 
@@ -145,6 +189,7 @@ message(
     "Fortran compiler: ${CMAKE_Fortran_COMPILER_ID} (${CMAKE_Fortran_COMPILER})"
 )
 message(STATUS "CUDA kernels:     ${MOM6_ENABLE_CUDA_KERNELS}")
+message(STATUS "MPI parallel:     ${MOM6_ENABLE_MPI}")
 message(STATUS "Module drivers:   ${MOM6_ENABLE_MODULE_DRIVERS}")
 message(STATUS "Install prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
