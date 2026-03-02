@@ -17,7 +17,7 @@ endif()
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -acc=multicore,gpu  -gpu=mem:separate")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
@@ -65,6 +65,7 @@ add_subdirectory(src/openacc)
 set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
                                               ${CMAKE_BINARY_DIR}/mod)
 
+target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
 # Include directory for modules
 target_include_directories(mom6_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
 

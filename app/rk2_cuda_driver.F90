@@ -170,7 +170,7 @@ program rk2_cuda_driver
     ! Free OpenACC device memory immediately after CUDA init copies what it needs
     call hor_visc_init(hvisc_CS_acc, G, GV, Kh=100.0_dp)
     call hor_visc_init_cuda(hvisc_CS, G%isd, G%ied, G%jsd, G%jed, &
-                            G%isc, G%iec, G%jsc, G%jec, &
+                            G%isc, G%iec, G%jsc, G%jec, nk, &
                             100.0_dp, hvisc_CS_acc%h_neglect, &
                             hvisc_CS_acc%DY_dxT, hvisc_CS_acc%DX_dyT, &
                             hvisc_CS_acc%DY_dxBu, hvisc_CS_acc%DX_dyBu, &
