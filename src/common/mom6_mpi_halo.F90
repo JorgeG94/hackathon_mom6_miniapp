@@ -16,7 +16,25 @@ module mom6_mpi_halo
 
     public :: halo_exchange_3d, halo_exchange_2d
 
+    ! GPU-aware MPI: pass device pointers directly to MPI, skip host staging.
+    ! Enabled by setting environment variable MOM6_GPU_AWARE_MPI=1
+    logical, save :: gpu_aware_mpi = .false.
+    logical, save :: gpu_aware_checked = .false.
+
 contains
+
+    subroutine check_gpu_aware_mpi()
+        character(len=32) :: env_val
+        integer :: env_len, env_stat
+        if (gpu_aware_checked) return
+        call get_environment_variable("MOM6_GPU_AWARE_MPI", env_val, env_len, env_stat)
+        if (env_stat == 0 .and. env_len > 0) then
+            if (trim(env_val) == "1" .or. trim(env_val) == "true") then
+                gpu_aware_mpi = .true.
+            end if
+        end if
+        gpu_aware_checked = .true.
+    end subroutine
 
     !> 3D halo exchange for OpenACC arrays
     !!
@@ -40,6 +58,8 @@ contains
         real(dp), allocatable :: recv_NE(:), recv_NW(:), recv_SE(:), recv_SW(:)
         type(MPI_Request) :: reqs(16)
         type(MPI_Status) :: stats(16)
+
+        call check_gpu_aware_mpi()
 
         hw = halo_width
         ni_total = ied - isd + 1
@@ -163,106 +183,38 @@ contains
             end do
         end do
 
-        ! === MPI communication with host staging ===
-        ! Copy send buffers from device to host
-        !$acc update self(send_E, send_W, send_N, send_S)
-        !$acc update self(send_NE, send_NW, send_SE, send_SW)
+        ! === MPI communication ===
+        if (gpu_aware_mpi) then
+            ! GPU-aware MPI: pass device pointers directly, skip host staging
+            !$acc wait
+            !$acc host_data use_device(send_E, recv_E, send_W, recv_W, &
+            !$acc     send_N, recv_N, send_S, recv_S, &
+            !$acc     send_NE, recv_NE, send_NW, recv_NW, &
+            !$acc     send_SE, recv_SE, send_SW, recv_SW)
 
-        nreqs = 0
+            nreqs = 0
+            call post_irecv_isend_3d(MD, reqs, nreqs, &
+                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
+                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
+                ew_size, ns_size, corner_size, 100)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-        ! Post receives then sends for each direction
-        ! East: recv from east neighbor into east halo
-        if (MD%east /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, 100, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%west /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, 101, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%north /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, 102, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%south /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, 103, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%ne /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, 104, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%nw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, 105, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%se /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, 106, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%sw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 107, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
+            !$acc end host_data
+        else
+            ! Host staging: GPU -> host -> MPI -> host -> GPU
+            !$acc update self(send_E, send_W, send_N, send_S)
+            !$acc update self(send_NE, send_NW, send_SE, send_SW)
 
-        ! Sends (matching tag: send east with tag 101 so west neighbor's recv_W gets it)
-        if (MD%east /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, 101, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%west /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, 100, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%north /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, 103, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%south /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, 102, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%ne /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, 107, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%nw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, 106, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%se /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, 105, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%sw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 104, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
+            nreqs = 0
+            call post_irecv_isend_3d(MD, reqs, nreqs, &
+                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
+                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
+                ew_size, ns_size, corner_size, 100)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-        ! Wait for all
-        if (nreqs > 0) then
-            call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            !$acc update device(recv_E, recv_W, recv_N, recv_S)
+            !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
         end if
-
-        ! Copy recv buffers to device
-        !$acc update device(recv_E, recv_W, recv_N, recv_S)
-        !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
 
         ! === UNPACK recv buffers on GPU ===
 
@@ -403,6 +355,8 @@ contains
         type(MPI_Request) :: reqs(16)
         type(MPI_Status) :: stats(16)
 
+        call check_gpu_aware_mpi()
+
         hw = halo_width
         ni_total = ied - isd + 1
         nj_total = jed - jsd + 1
@@ -490,102 +444,36 @@ contains
             end do
         end do
 
-        ! === MPI (host staging) ===
-        !$acc update self(send_E, send_W, send_N, send_S)
-        !$acc update self(send_NE, send_NW, send_SE, send_SW)
+        ! === MPI communication ===
+        if (gpu_aware_mpi) then
+            !$acc wait
+            !$acc host_data use_device(send_E, recv_E, send_W, recv_W, &
+            !$acc     send_N, recv_N, send_S, recv_S, &
+            !$acc     send_NE, recv_NE, send_NW, recv_NW, &
+            !$acc     send_SE, recv_SE, send_SW, recv_SW)
 
-        nreqs = 0
+            nreqs = 0
+            call post_irecv_isend_3d(MD, reqs, nreqs, &
+                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
+                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
+                ew_size, ns_size, corner_size, 200)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-        ! Receives
-        if (MD%east /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, 200, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%west /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, 201, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%north /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, 202, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%south /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, 203, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%ne /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, 204, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%nw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, 205, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%se /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, 206, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%sw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Irecv(recv_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 207, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
+            !$acc end host_data
+        else
+            !$acc update self(send_E, send_W, send_N, send_S)
+            !$acc update self(send_NE, send_NW, send_SE, send_SW)
 
-        ! Sends
-        if (MD%east /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, 201, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%west /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, 200, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%north /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, 203, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%south /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, 202, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%ne /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, 207, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%nw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, 206, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%se /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, 205, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
-        if (MD%sw /= MPI_PROC_NULL) then
-            nreqs = nreqs + 1
-            call MPI_Isend(send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, 204, &
-                           MD%comm, reqs(nreqs), ierr)
-        end if
+            nreqs = 0
+            call post_irecv_isend_3d(MD, reqs, nreqs, &
+                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
+                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
+                ew_size, ns_size, corner_size, 200)
+            if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-        if (nreqs > 0) then
-            call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
+            !$acc update device(recv_E, recv_W, recv_N, recv_S)
+            !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
         end if
-
-        !$acc update device(recv_E, recv_W, recv_N, recv_S)
-        !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
 
         ! === UNPACK ===
         if (MD%east /= MPI_PROC_NULL) then
@@ -680,5 +568,106 @@ contains
         deallocate(send_SE, recv_SE, send_SW, recv_SW)
 
     end subroutine halo_exchange_2d
+
+    !> Post all Irecv and Isend for 8-direction halo exchange.
+    !! Shared by both GPU-aware and host-staging paths.
+    subroutine post_irecv_isend_3d(MD, reqs, nreqs, &
+            send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
+            send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
+            ew_size, ns_size, corner_size, tag_base)
+        type(mpi_domain_type), intent(in) :: MD
+        type(MPI_Request), intent(inout) :: reqs(:)
+        integer, intent(inout) :: nreqs
+        real(dp), intent(inout) :: send_E(*), recv_E(*), send_W(*), recv_W(*)
+        real(dp), intent(inout) :: send_N(*), recv_N(*), send_S(*), recv_S(*)
+        real(dp), intent(inout) :: send_NE(*), recv_NE(*), send_NW(*), recv_NW(*)
+        real(dp), intent(inout) :: send_SE(*), recv_SE(*), send_SW(*), recv_SW(*)
+        integer, intent(in) :: ew_size, ns_size, corner_size, tag_base
+        integer :: ierr
+
+        ! Receives
+        if (MD%east /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                           tag_base, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%west /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                           tag_base+1, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%north /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                           tag_base+2, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%south /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                           tag_base+3, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%ne /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                           tag_base+4, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%nw /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                           tag_base+5, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%se /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                           tag_base+6, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%sw /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Irecv(recv_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                           tag_base+7, MD%comm, reqs(nreqs), ierr)
+        end if
+
+        ! Sends (tag swapped so east send matches west recv, etc.)
+        if (MD%east /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                           tag_base+1, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%west /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                           tag_base, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%north /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                           tag_base+3, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%south /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                           tag_base+2, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%ne /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                           tag_base+7, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%nw /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                           tag_base+6, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%se /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                           tag_base+5, MD%comm, reqs(nreqs), ierr)
+        end if
+        if (MD%sw /= MPI_PROC_NULL) then
+            nreqs = nreqs + 1
+            call MPI_Isend(send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                           tag_base+4, MD%comm, reqs(nreqs), ierr)
+        end if
+    end subroutine
 
 end module mom6_mpi_halo
