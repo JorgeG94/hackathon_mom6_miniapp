@@ -19,7 +19,7 @@ program rk2_mpi_driver
                           init_vertvisc_visc, end_vertvisc_visc
     use mom6_mpi_domain, only: mpi_domain_type, mpi_domain_init, &
                                mpi_domain_end, init_ocean_grid_mpi
-    use mom6_mpi_halo, only: halo_exchange_3d, halo_exchange_2d
+    use mom6_mpi_halo, only: halo_exchange_3d, halo_exchange_2d, halo_cleanup
     use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
     use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                              SADOURNY75_ENERGY
@@ -509,6 +509,7 @@ program rk2_mpi_driver
     deallocate(diffu, diffv)
     deallocate(eta, ubt, vbt, ubt_av, vbt_av, eta_av)
 
+    call halo_cleanup()
     call mpi_domain_end(MD)
     call MPI_Finalize(ierr)
 

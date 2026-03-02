@@ -95,6 +95,20 @@ mpirun -np 8 --npernode 4 ./rk2_mpi_cuda_driver 720 720 75 10 30
 - `npes_x`, `npes_y`: PE layout (optional). If omitted, `MPI_Dims_create` auto-decomposes.
   `npes_x * npes_y` must equal the number of MPI ranks.
 
+### GPU-Aware MPI
+
+By default, halo exchanges use host staging (GPU→host→MPI→host→GPU). To enable GPU-aware MPI, which passes device pointers directly to MPI and eliminates the intermediate memory copies, set the environment variable:
+
+```bash
+export MOM6_GPU_AWARE_MPI=1
+mpirun -np 4 ./rk2_mpi_cuda_driver 360 360 75 10 30
+```
+
+This requires an MPI library built with CUDA support (e.g., OpenMPI+UCX or MVAPICH2-GDR). A diagnostic message is printed at startup confirming which path is active:
+```
+[MPI Halo CUDA] GPU-aware MPI: ENABLED
+```
+
 ### Module Drivers (with `-DMOM6_ENABLE_MODULE_DRIVERS=ON`)
 
 ```bash
@@ -258,7 +272,7 @@ hackathon_mom6_miniapp/
 │   │   ├── mom6_profiler.F90           # Portable profiler with NVTX
 │   │   ├── mom6_diag.F90              # Simplified diagnostics
 │   │   ├── mom6_mpi_domain.F90        # MPI domain decomposition (2D Cartesian)
-│   │   └── mom6_mpi_halo.F90         # OpenACC halo exchange (host-staging MPI)
+│   │   └── mom6_mpi_halo.F90         # OpenACC halo exchange (GPU-aware or host-staging)
 │   ├── openacc/
 │   │   ├── mom6_continuity.F90        # PPM continuity solver
 │   │   ├── mom6_continuity_adjust.F90 # Continuity flux adjustment
@@ -272,7 +286,7 @@ hackathon_mom6_miniapp/
 │       ├── mom6_barotropic_cuda.F90   # CUDA Fortran barotropic
 │       ├── mom6_vert_visc_cuda.F90    # CUDA Fortran vertical viscosity
 │       ├── mom6_hor_visc_cuda.F90     # CUDA Fortran horizontal viscosity
-│       └── mom6_mpi_halo_cuda.F90    # CUDA halo exchange (host-staging MPI)
+│       └── mom6_mpi_halo_cuda.F90    # CUDA halo exchange (GPU-aware or host-staging)
 ├── app/
 │   ├── rk2_driver.F90                 # OpenACC RK2 driver (single GPU)
 │   ├── rk2_cuda_driver.F90            # CUDA RK2 driver (single GPU)

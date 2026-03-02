@@ -7,6 +7,14 @@
 !! Exchange pattern: 4 cardinal + 4 corner directions (8 total).
 !! For boundary PEs (neighbor = MPI_PROC_NULL), MPI handles skip automatically.
 !!
+!! Buffers are persistent (allocated once, reused across calls) to avoid
+!! per-call cudaMalloc/cudaFree from !$acc enter data create / exit data delete.
+!!
+!! GPU-aware path: MPI calls are inlined directly within !$acc host_data
+!! use_device blocks to ensure device pointers are passed to MPI without
+!! going through an intermediate subroutine (which can lose the device
+!! pointer context with mpi_f08 descriptors).
+!!
 module mom6_mpi_halo
     use mpi_f08
     use iso_fortran_env, only: dp => real64
@@ -14,18 +22,27 @@ module mom6_mpi_halo
     implicit none
     private
 
-    public :: halo_exchange_3d, halo_exchange_2d
+    public :: halo_exchange_3d, halo_exchange_2d, halo_cleanup
 
     ! GPU-aware MPI: pass device pointers directly to MPI, skip host staging.
     ! Enabled by setting environment variable MOM6_GPU_AWARE_MPI=1
     logical, save :: gpu_aware_mpi = .false.
     logical, save :: gpu_aware_checked = .false.
 
+    ! Persistent send/recv buffers — allocated once on first use (or when
+    ! sizes change), kept alive across calls.
+    real(dp), allocatable, save :: send_E(:), recv_E(:), send_W(:), recv_W(:)
+    real(dp), allocatable, save :: send_N(:), recv_N(:), send_S(:), recv_S(:)
+    real(dp), allocatable, save :: send_NE(:), recv_NE(:), send_NW(:), recv_NW(:)
+    real(dp), allocatable, save :: send_SE(:), recv_SE(:), send_SW(:), recv_SW(:)
+    integer, save :: alloc_ew = -1, alloc_ns = -1, alloc_co = -1
+
 contains
 
     subroutine check_gpu_aware_mpi()
         character(len=32) :: env_val
         integer :: env_len, env_stat
+        integer :: rank, ierr
         if (gpu_aware_checked) return
         call get_environment_variable("MOM6_GPU_AWARE_MPI", env_val, env_len, env_stat)
         if (env_stat == 0 .and. env_len > 0) then
@@ -34,49 +51,38 @@ contains
             end if
         end if
         gpu_aware_checked = .true.
+        ! Diagnostic output on rank 0
+        call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+        if (rank == 0) then
+            if (gpu_aware_mpi) then
+                write(*,'(A)') "[MPI Halo OpenACC] GPU-aware MPI: ENABLED"
+            else
+                write(*,'(A)') "[MPI Halo OpenACC] GPU-aware MPI: DISABLED (host staging)"
+            end if
+        end if
     end subroutine
 
-    !> 3D halo exchange for OpenACC arrays
-    !!
-    !! array(isd:ied, jsd:jed, nz) must already be on GPU via OpenACC.
-    !! Exchanges halo_width cells in each direction (cardinal + corners).
-    subroutine halo_exchange_3d(array, isd, ied, jsd, jed, nz, MD, halo_width)
-        integer, intent(in) :: isd, ied, jsd, jed, nz, halo_width
-        real(dp), intent(inout) :: array(isd:ied, jsd:jed, nz)
-        type(mpi_domain_type), intent(in) :: MD
+    !> Ensure persistent buffers are allocated with at least the given sizes.
+    !! Allocates on first call; reallocates only if sizes increase.
+    subroutine ensure_buffers(ew_size, ns_size, corner_size)
+        integer, intent(in) :: ew_size, ns_size, corner_size
 
-        ! Buffer sizes
-        integer :: ni_total, nj_total, hw
-        integer :: ew_size, ns_size, corner_size
-        integer :: nreqs, i, j, k, idx
-        integer :: ierr
+        if (ew_size <= alloc_ew .and. ns_size <= alloc_ns .and. &
+            corner_size <= alloc_co) return
 
-        ! Send/recv buffers
-        real(dp), allocatable :: send_E(:), send_W(:), send_N(:), send_S(:)
-        real(dp), allocatable :: recv_E(:), recv_W(:), recv_N(:), recv_S(:)
-        real(dp), allocatable :: send_NE(:), send_NW(:), send_SE(:), send_SW(:)
-        real(dp), allocatable :: recv_NE(:), recv_NW(:), recv_SE(:), recv_SW(:)
-        type(MPI_Request) :: reqs(16)
-        type(MPI_Status) :: stats(16)
+        ! Free old buffers if previously allocated
+        if (allocated(send_E)) then
+            !$acc exit data delete(send_E, recv_E, send_W, recv_W)
+            !$acc exit data delete(send_N, recv_N, send_S, recv_S)
+            !$acc exit data delete(send_NE, recv_NE, send_NW, recv_NW)
+            !$acc exit data delete(send_SE, recv_SE, send_SW, recv_SW)
+            deallocate(send_E, recv_E, send_W, recv_W)
+            deallocate(send_N, recv_N, send_S, recv_S)
+            deallocate(send_NE, recv_NE, send_NW, recv_NW)
+            deallocate(send_SE, recv_SE, send_SW, recv_SW)
+        end if
 
-        call check_gpu_aware_mpi()
-
-        hw = halo_width
-        ni_total = ied - isd + 1
-        nj_total = jed - jsd + 1
-
-        ! East/West strips: hw columns x nj_compute rows x nz layers
-        ! nj_compute = nj_total - 2*hw (just the compute domain rows)
-        ew_size = hw * (nj_total - 2 * hw) * nz
-
-        ! North/South strips: ni_total columns x hw rows x nz layers
-        ! Use full width including halos for simplicity
-        ns_size = ni_total * hw * nz
-
-        ! Corner blocks: hw x hw x nz
-        corner_size = hw * hw * nz
-
-        ! Allocate buffers
+        ! Allocate new buffers
         allocate(send_E(ew_size), recv_E(ew_size))
         allocate(send_W(ew_size), recv_W(ew_size))
         allocate(send_N(ns_size), recv_N(ns_size))
@@ -86,16 +92,45 @@ contains
         allocate(send_SE(corner_size), recv_SE(corner_size))
         allocate(send_SW(corner_size), recv_SW(corner_size))
 
+        ! Create persistent device copies (one-time cost)
         !$acc enter data create(send_E, recv_E, send_W, recv_W)
         !$acc enter data create(send_N, recv_N, send_S, recv_S)
         !$acc enter data create(send_NE, recv_NE, send_NW, recv_NW)
         !$acc enter data create(send_SE, recv_SE, send_SW, recv_SW)
 
+        alloc_ew = ew_size
+        alloc_ns = ns_size
+        alloc_co = corner_size
+    end subroutine
+
+    !> 3D halo exchange for OpenACC arrays
+    subroutine halo_exchange_3d(array, isd, ied, jsd, jed, nz, MD, halo_width)
+        integer, intent(in) :: isd, ied, jsd, jed, nz, halo_width
+        real(dp), intent(inout) :: array(isd:ied, jsd:jed, nz)
+        type(mpi_domain_type), intent(in) :: MD
+
+        integer :: ni_total, nj_total, hw
+        integer :: ew_size, ns_size, corner_size
+        integer :: nreqs, i, j, k, idx
+        integer :: ierr
+
+        type(MPI_Request) :: reqs(16)
+        type(MPI_Status) :: stats(16)
+
+        call check_gpu_aware_mpi()
+
+        hw = halo_width
+        ni_total = ied - isd + 1
+        nj_total = jed - jsd + 1
+
+        ew_size = hw * (nj_total - 2 * hw) * nz
+        ns_size = ni_total * hw * nz
+        corner_size = hw * hw * nz
+
+        call ensure_buffers(ew_size, ns_size, corner_size)
+
         ! === PACK send buffers on GPU ===
 
-        ! East: send rightmost hw compute columns
-        ! Compute domain i: isc=isd+hw to iec=ied-hw
-        ! Send columns iec-hw+1 to iec
         !$acc parallel loop collapse(3) present(array, send_E)
         do k = 1, nz
             do j = jsd + hw, jed - hw
@@ -106,7 +141,6 @@ contains
             end do
         end do
 
-        ! West: send leftmost hw compute columns
         !$acc parallel loop collapse(3) present(array, send_W)
         do k = 1, nz
             do j = jsd + hw, jed - hw
@@ -117,7 +151,6 @@ contains
             end do
         end do
 
-        ! North: send topmost hw compute rows (full width)
         !$acc parallel loop collapse(3) present(array, send_N)
         do k = 1, nz
             do j = 1, hw
@@ -128,7 +161,6 @@ contains
             end do
         end do
 
-        ! South: send bottommost hw compute rows (full width)
         !$acc parallel loop collapse(3) present(array, send_S)
         do k = 1, nz
             do j = 1, hw
@@ -139,7 +171,6 @@ contains
             end do
         end do
 
-        ! NE corner: send top-right hw x hw block
         !$acc parallel loop collapse(3) present(array, send_NE)
         do k = 1, nz
             do j = 1, hw
@@ -150,7 +181,6 @@ contains
             end do
         end do
 
-        ! NW corner
         !$acc parallel loop collapse(3) present(array, send_NW)
         do k = 1, nz
             do j = 1, hw
@@ -161,7 +191,6 @@ contains
             end do
         end do
 
-        ! SE corner
         !$acc parallel loop collapse(3) present(array, send_SE)
         do k = 1, nz
             do j = 1, hw
@@ -172,7 +201,6 @@ contains
             end do
         end do
 
-        ! SW corner
         !$acc parallel loop collapse(3) present(array, send_SW)
         do k = 1, nz
             do j = 1, hw
@@ -185,7 +213,9 @@ contains
 
         ! === MPI communication ===
         if (gpu_aware_mpi) then
-            ! GPU-aware MPI: pass device pointers directly, skip host staging
+            ! GPU-aware MPI: device pointers passed directly to MPI.
+            ! MPI calls MUST be inline within host_data use_device — calling
+            ! through a subroutine can lose the device pointer with mpi_f08.
             !$acc wait
             !$acc host_data use_device(send_E, recv_E, send_W, recv_W, &
             !$acc     send_N, recv_N, send_S, recv_S, &
@@ -193,32 +223,114 @@ contains
             !$acc     send_SE, recv_SE, send_SW, recv_SW)
 
             nreqs = 0
-            call post_irecv_isend_3d(MD, reqs, nreqs, &
-                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
-                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
-                ew_size, ns_size, corner_size, 100)
+            ! Receives
+            if (MD%east /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                               100, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%west /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                               101, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%north /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                               102, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%south /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                               103, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%ne /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                               104, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%nw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                               105, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%se /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                               106, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%sw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                               107, MD%comm, reqs(nreqs), ierr)
+            end if
+            ! Sends (tag swapped so east send matches west recv, etc.)
+            if (MD%east /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                               101, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%west /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                               100, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%north /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                               103, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%south /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                               102, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%ne /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                               107, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%nw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                               106, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%se /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                               105, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%sw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                               104, MD%comm, reqs(nreqs), ierr)
+            end if
+
             if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
             !$acc end host_data
         else
             ! Host staging: GPU -> host -> MPI -> host -> GPU
-            !$acc update self(send_E, send_W, send_N, send_S)
-            !$acc update self(send_NE, send_NW, send_SE, send_SW)
+            !$acc update self(send_E(1:ew_size), send_W(1:ew_size))
+            !$acc update self(send_N(1:ns_size), send_S(1:ns_size))
+            !$acc update self(send_NE(1:corner_size), send_NW(1:corner_size))
+            !$acc update self(send_SE(1:corner_size), send_SW(1:corner_size))
 
             nreqs = 0
-            call post_irecv_isend_3d(MD, reqs, nreqs, &
+            call post_irecv_isend(MD, reqs, nreqs, &
                 send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
                 send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
                 ew_size, ns_size, corner_size, 100)
             if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-            !$acc update device(recv_E, recv_W, recv_N, recv_S)
-            !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
+            !$acc update device(recv_E(1:ew_size), recv_W(1:ew_size))
+            !$acc update device(recv_N(1:ns_size), recv_S(1:ns_size))
+            !$acc update device(recv_NE(1:corner_size), recv_NW(1:corner_size))
+            !$acc update device(recv_SE(1:corner_size), recv_SW(1:corner_size))
         end if
 
         ! === UNPACK recv buffers on GPU ===
 
-        ! East halo: columns ied-hw+1 to ied
         if (MD%east /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_E)
             do k = 1, nz
@@ -231,7 +343,6 @@ contains
             end do
         end if
 
-        ! West halo: columns isd to isd+hw-1
         if (MD%west /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_W)
             do k = 1, nz
@@ -244,7 +355,6 @@ contains
             end do
         end if
 
-        ! North halo: rows jed-hw+1 to jed
         if (MD%north /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_N)
             do k = 1, nz
@@ -257,7 +367,6 @@ contains
             end do
         end if
 
-        ! South halo: rows jsd to jsd+hw-1
         if (MD%south /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_S)
             do k = 1, nz
@@ -270,7 +379,6 @@ contains
             end do
         end if
 
-        ! NE corner halo
         if (MD%ne /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_NE)
             do k = 1, nz
@@ -283,7 +391,6 @@ contains
             end do
         end if
 
-        ! NW corner halo
         if (MD%nw /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_NW)
             do k = 1, nz
@@ -296,7 +403,6 @@ contains
             end do
         end if
 
-        ! SE corner halo
         if (MD%se /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_SE)
             do k = 1, nz
@@ -309,7 +415,6 @@ contains
             end do
         end if
 
-        ! SW corner halo
         if (MD%sw /= MPI_PROC_NULL) then
             !$acc parallel loop collapse(3) present(array, recv_SW)
             do k = 1, nz
@@ -322,22 +427,9 @@ contains
             end do
         end if
 
-        ! Cleanup
-        !$acc exit data delete(send_E, recv_E, send_W, recv_W)
-        !$acc exit data delete(send_N, recv_N, send_S, recv_S)
-        !$acc exit data delete(send_NE, recv_NE, send_NW, recv_NW)
-        !$acc exit data delete(send_SE, recv_SE, send_SW, recv_SW)
-
-        deallocate(send_E, recv_E, send_W, recv_W)
-        deallocate(send_N, recv_N, send_S, recv_S)
-        deallocate(send_NE, recv_NE, send_NW, recv_NW)
-        deallocate(send_SE, recv_SE, send_SW, recv_SW)
-
     end subroutine halo_exchange_3d
 
     !> 2D halo exchange for OpenACC arrays
-    !!
-    !! array(isd:ied, jsd:jed) must already be on GPU via OpenACC.
     subroutine halo_exchange_2d(array, isd, ied, jsd, jed, MD, halo_width)
         integer, intent(in) :: isd, ied, jsd, jed, halo_width
         real(dp), intent(inout) :: array(isd:ied, jsd:jed)
@@ -348,10 +440,6 @@ contains
         integer :: nreqs, i, j, idx
         integer :: ierr
 
-        real(dp), allocatable :: send_E(:), send_W(:), send_N(:), send_S(:)
-        real(dp), allocatable :: recv_E(:), recv_W(:), recv_N(:), recv_S(:)
-        real(dp), allocatable :: send_NE(:), send_NW(:), send_SE(:), send_SW(:)
-        real(dp), allocatable :: recv_NE(:), recv_NW(:), recv_SE(:), recv_SW(:)
         type(MPI_Request) :: reqs(16)
         type(MPI_Status) :: stats(16)
 
@@ -365,19 +453,7 @@ contains
         ns_size = ni_total * hw
         corner_size = hw * hw
 
-        allocate(send_E(ew_size), recv_E(ew_size))
-        allocate(send_W(ew_size), recv_W(ew_size))
-        allocate(send_N(ns_size), recv_N(ns_size))
-        allocate(send_S(ns_size), recv_S(ns_size))
-        allocate(send_NE(corner_size), recv_NE(corner_size))
-        allocate(send_NW(corner_size), recv_NW(corner_size))
-        allocate(send_SE(corner_size), recv_SE(corner_size))
-        allocate(send_SW(corner_size), recv_SW(corner_size))
-
-        !$acc enter data create(send_E, recv_E, send_W, recv_W)
-        !$acc enter data create(send_N, recv_N, send_S, recv_S)
-        !$acc enter data create(send_NE, recv_NE, send_NW, recv_NW)
-        !$acc enter data create(send_SE, recv_SE, send_SW, recv_SW)
+        call ensure_buffers(ew_size, ns_size, corner_size)
 
         ! === PACK ===
         !$acc parallel loop collapse(2) present(array, send_E)
@@ -446,6 +522,7 @@ contains
 
         ! === MPI communication ===
         if (gpu_aware_mpi) then
+            ! GPU-aware MPI: inline MPI calls within host_data use_device
             !$acc wait
             !$acc host_data use_device(send_E, recv_E, send_W, recv_W, &
             !$acc     send_N, recv_N, send_S, recv_S, &
@@ -453,26 +530,109 @@ contains
             !$acc     send_SE, recv_SE, send_SW, recv_SW)
 
             nreqs = 0
-            call post_irecv_isend_3d(MD, reqs, nreqs, &
-                send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
-                send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
-                ew_size, ns_size, corner_size, 200)
+            ! Receives
+            if (MD%east /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                               200, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%west /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                               201, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%north /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                               202, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%south /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                               203, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%ne /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                               204, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%nw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                               205, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%se /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                               206, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%sw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Irecv(recv_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                               207, MD%comm, reqs(nreqs), ierr)
+            end if
+            ! Sends
+            if (MD%east /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_E, ew_size, MPI_DOUBLE_PRECISION, MD%east, &
+                               201, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%west /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_W, ew_size, MPI_DOUBLE_PRECISION, MD%west, &
+                               200, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%north /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_N, ns_size, MPI_DOUBLE_PRECISION, MD%north, &
+                               203, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%south /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_S, ns_size, MPI_DOUBLE_PRECISION, MD%south, &
+                               202, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%ne /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_NE, corner_size, MPI_DOUBLE_PRECISION, MD%ne, &
+                               207, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%nw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_NW, corner_size, MPI_DOUBLE_PRECISION, MD%nw, &
+                               206, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%se /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_SE, corner_size, MPI_DOUBLE_PRECISION, MD%se, &
+                               205, MD%comm, reqs(nreqs), ierr)
+            end if
+            if (MD%sw /= MPI_PROC_NULL) then
+                nreqs = nreqs + 1
+                call MPI_Isend(send_SW, corner_size, MPI_DOUBLE_PRECISION, MD%sw, &
+                               204, MD%comm, reqs(nreqs), ierr)
+            end if
+
             if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
             !$acc end host_data
         else
-            !$acc update self(send_E, send_W, send_N, send_S)
-            !$acc update self(send_NE, send_NW, send_SE, send_SW)
+            !$acc update self(send_E(1:ew_size), send_W(1:ew_size))
+            !$acc update self(send_N(1:ns_size), send_S(1:ns_size))
+            !$acc update self(send_NE(1:corner_size), send_NW(1:corner_size))
+            !$acc update self(send_SE(1:corner_size), send_SW(1:corner_size))
 
             nreqs = 0
-            call post_irecv_isend_3d(MD, reqs, nreqs, &
+            call post_irecv_isend(MD, reqs, nreqs, &
                 send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
                 send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
                 ew_size, ns_size, corner_size, 200)
             if (nreqs > 0) call MPI_Waitall(nreqs, reqs(1:nreqs), stats(1:nreqs), ierr)
 
-            !$acc update device(recv_E, recv_W, recv_N, recv_S)
-            !$acc update device(recv_NE, recv_NW, recv_SE, recv_SW)
+            !$acc update device(recv_E(1:ew_size), recv_W(1:ew_size))
+            !$acc update device(recv_N(1:ns_size), recv_S(1:ns_size))
+            !$acc update device(recv_NE(1:corner_size), recv_NW(1:corner_size))
+            !$acc update device(recv_SE(1:corner_size), recv_SW(1:corner_size))
         end if
 
         ! === UNPACK ===
@@ -556,22 +716,29 @@ contains
             end do
         end if
 
-        ! Cleanup
-        !$acc exit data delete(send_E, recv_E, send_W, recv_W)
-        !$acc exit data delete(send_N, recv_N, send_S, recv_S)
-        !$acc exit data delete(send_NE, recv_NE, send_NW, recv_NW)
-        !$acc exit data delete(send_SE, recv_SE, send_SW, recv_SW)
-
-        deallocate(send_E, recv_E, send_W, recv_W)
-        deallocate(send_N, recv_N, send_S, recv_S)
-        deallocate(send_NE, recv_NE, send_NW, recv_NW)
-        deallocate(send_SE, recv_SE, send_SW, recv_SW)
-
     end subroutine halo_exchange_2d
 
+    !> Free persistent halo buffers. Call at program finalization.
+    subroutine halo_cleanup()
+        if (allocated(send_E)) then
+            !$acc exit data delete(send_E, recv_E, send_W, recv_W)
+            !$acc exit data delete(send_N, recv_N, send_S, recv_S)
+            !$acc exit data delete(send_NE, recv_NE, send_NW, recv_NW)
+            !$acc exit data delete(send_SE, recv_SE, send_SW, recv_SW)
+            deallocate(send_E, recv_E, send_W, recv_W)
+            deallocate(send_N, recv_N, send_S, recv_S)
+            deallocate(send_NE, recv_NE, send_NW, recv_NW)
+            deallocate(send_SE, recv_SE, send_SW, recv_SW)
+        end if
+        alloc_ew = -1
+        alloc_ns = -1
+        alloc_co = -1
+    end subroutine
+
     !> Post all Irecv and Isend for 8-direction halo exchange.
-    !! Shared by both GPU-aware and host-staging paths.
-    subroutine post_irecv_isend_3d(MD, reqs, nreqs, &
+    !! Used ONLY by the host-staging fallback path (not the GPU-aware path,
+    !! which has MPI calls inlined within host_data use_device).
+    subroutine post_irecv_isend(MD, reqs, nreqs, &
             send_E, recv_E, send_W, recv_W, send_N, recv_N, send_S, recv_S, &
             send_NE, recv_NE, send_NW, recv_NW, send_SE, recv_SE, send_SW, recv_SW, &
             ew_size, ns_size, corner_size, tag_base)

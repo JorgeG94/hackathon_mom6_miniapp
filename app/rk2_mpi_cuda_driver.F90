@@ -14,7 +14,7 @@ program rk2_mpi_cuda_driver
                           end_ocean_grid, G_EARTH
     use mom6_mpi_domain, only: mpi_domain_type, mpi_domain_init, &
                                mpi_domain_end, init_ocean_grid_mpi
-    use mom6_mpi_halo_cuda, only: halo_exchange_3d_cuda, halo_exchange_2d_cuda
+    use mom6_mpi_halo_cuda, only: halo_exchange_3d_cuda, halo_exchange_2d_cuda, halo_cleanup_cuda
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
 
@@ -558,6 +558,7 @@ program rk2_mpi_cuda_driver
     end if
     call profiler_end()
 
+    call halo_cleanup_cuda()
     call mpi_domain_end(MD)
     call MPI_Finalize(ierr)
 
