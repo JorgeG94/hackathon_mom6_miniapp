@@ -290,15 +290,15 @@ contains
                 call update_v(CS, G, is, ie, js, je - 1)
             end if
 
-            ! Compute transports and update eta
+            ! Compute transports (extended range for MPI boundary correctness)
             !$acc parallel loop collapse(2)
             do j=js,je
-            do i=is,ie - 1
+            do i=is - 1,ie
                 CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
             end do
             end do
             !$acc parallel loop collapse(2)
-            do j=js,je - 1
+            do j=js - 1,je
             do i=is,ie
                 CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
             end do
@@ -504,15 +504,15 @@ contains
             call update_v(CS, G, is, ie, js, je - 1)
         end if
 
-        ! Compute transports and update eta
+        ! Compute transports (extended range for MPI boundary correctness)
         !$acc parallel loop collapse(2)
         do j = js, je
-        do i = is, ie - 1
+        do i = is - 1, ie
             CS%uhbt(i, j) = CS%Datu(i, j)*(trans_wt1*CS%ubt(i, j) + trans_wt2*CS%ubt_prev(i, j))
         end do
         end do
         !$acc parallel loop collapse(2)
-        do j = js, je - 1
+        do j = js - 1, je
         do i = is, ie
             CS%vhbt(i, j) = CS%Datv(i, j)*(trans_wt1*CS%vbt(i, j) + trans_wt2*CS%vbt_prev(i, j))
         end do

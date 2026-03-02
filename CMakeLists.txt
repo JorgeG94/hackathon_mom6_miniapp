@@ -43,8 +43,8 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # CUDA Fortran kernels (opt-in, nvfortran only)
 # =============================================================================
 
-option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
-option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
+option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" ON)
+option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" ON)
 
 if(MOM6_ENABLE_CUDA_KERNELS)
   if(NOT CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")

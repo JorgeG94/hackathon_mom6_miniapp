@@ -299,16 +299,16 @@ program rk2_mpi_driver
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
-            ! 6. Barotropic predictor step (split API with halo exchanges every 3 substeps)
+            ! 6. Barotropic predictor step (split API with halo exchanges every substep)
             call profiler_start("Barotropic")
             call system_clock(clock_start, clock_rate)
             call btstep_init_state(bt_CS, G, eta, ubt, vbt)
             do bt_n = 1, bt_CS%nstep
                 call btstep_do_step(bt_CS, G, bt_n)
-                if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS%nstep) then
-                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                if (bt_n < bt_CS%nstep) then
+                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 1)
                 end if
             end do
             call btstep_get_output(bt_CS, G, ubt_av, vbt_av, eta_av)
@@ -397,16 +397,16 @@ program rk2_mpi_driver
             t_vert_visc = t_vert_visc + real(clock_end - clock_start, dp) / real(clock_rate, dp)
             call profiler_stop("VertVisc")
 
-            ! 13. Barotropic corrector (split API with halo exchanges every 3 substeps)
+            ! 13. Barotropic corrector (split API with halo exchanges every substep)
             call profiler_start("Barotropic")
             call system_clock(clock_start, clock_rate)
             call btstep_init_state(bt_CS, G, eta_av, ubt_av, vbt_av)
             do bt_n = 1, bt_CS%nstep
                 call btstep_do_step(bt_CS, G, bt_n)
-                if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS%nstep) then
-                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                if (bt_n < bt_CS%nstep) then
+                    call halo_exchange_2d(bt_CS%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                    call halo_exchange_2d(bt_CS%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                    call halo_exchange_2d(bt_CS%eta, G%isd, G%ied, G%jsd, G%jed, MD, 1)
                 end if
             end do
             call btstep_get_output(bt_CS, G, ubt_av, vbt_av, eta)

@@ -361,17 +361,17 @@ program rk2_mpi_cuda_driver
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
 
-        ! 6. Barotropic predictor (split API with halo exchanges every 3 substeps)
+        ! 6. Barotropic predictor (split API with halo exchanges every substep)
         call profiler_start("Barotropic")
         t_start = omp_get_wtime()
         call btstep_cuda_init_state(bt_CS_cuda, eta_d, ubt_d, vbt_d)
         do bt_n = 1, bt_CS_cuda%nstep
             call btstep_cuda_do_step(bt_CS_cuda, bt_n)
-            if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS_cuda%nstep) then
+            if (bt_n < bt_CS_cuda%nstep) then
                 istat = cudaDeviceSynchronize()
-                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 1)
             end if
         end do
         call btstep_cuda_get_output(bt_CS_cuda, ubt_av_d, vbt_av_d, eta_av_d)
@@ -450,17 +450,17 @@ program rk2_mpi_cuda_driver
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
 
-        ! 13. Barotropic corrector (split API with halo exchanges every 3 substeps)
+        ! 13. Barotropic corrector (split API with halo exchanges every substep)
         call profiler_start("Barotropic")
         t_start = omp_get_wtime()
         call btstep_cuda_init_state(bt_CS_cuda, eta_av_d, ubt_av_d, vbt_av_d)
         do bt_n = 1, bt_CS_cuda%nstep
             call btstep_cuda_do_step(bt_CS_cuda, bt_n)
-            if (mod(bt_n, 3) == 0 .and. bt_n < bt_CS_cuda%nstep) then
+            if (bt_n < bt_CS_cuda%nstep) then
                 istat = cudaDeviceSynchronize()
-                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+                call halo_exchange_2d_cuda(bt_CS_cuda%ubt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                call halo_exchange_2d_cuda(bt_CS_cuda%vbt, G%isd, G%ied, G%jsd, G%jed, MD, 1)
+                call halo_exchange_2d_cuda(bt_CS_cuda%eta, G%isd, G%ied, G%jsd, G%jed, MD, 1)
             end if
         end do
         call btstep_cuda_get_output(bt_CS_cuda, ubt_av_d, vbt_av_d, eta_d)

@@ -305,13 +305,15 @@ contains
 
         if (i > n1 .or. j > n2) return
 
-        ! Compute u-transport: i in [is_l-1 : ie_l-1], j in [js_l : je_l]
-        if (i >= is_l - 1 .and. i <= ie_l - 1 .and. j >= js_l .and. j <= je_l) then
+        ! Compute u-transport: i in [is_l-1 : ie_l], j in [js_l : je_l]
+        ! Extended range for MPI boundary correctness
+        if (i >= is_l - 1 .and. i <= ie_l .and. j >= js_l .and. j <= je_l) then
             uhbt(i, j) = Datu(i, j) * (trans_wt1 * ubt(i, j) + trans_wt2 * ubt_prev(i, j))
         end if
 
-        ! Compute v-transport: i in [is_l : ie_l], j in [js_l-1 : je_l-1]
-        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l - 1) then
+        ! Compute v-transport: i in [is_l : ie_l], j in [js_l-1 : je_l]
+        ! Extended range for MPI boundary correctness
+        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l) then
             vhbt(i, j) = Datv(i, j) * (trans_wt1 * vbt(i, j) + trans_wt2 * vbt_prev(i, j))
         end if
 
@@ -326,13 +328,13 @@ contains
         ! averages alongside the transport computation.
 
         ! Accumulate u time averages: same range as uhbt
-        if (i >= is_l - 1 .and. i <= ie_l - 1 .and. j >= js_l .and. j <= je_l) then
+        if (i >= is_l - 1 .and. i <= ie_l .and. j >= js_l .and. j <= je_l) then
             ubt_av(i, j) = ubt_av(i, j) + ubt(i, j) * inv_nstep
             uhbt_av(i, j) = uhbt_av(i, j) + uhbt(i, j) * inv_nstep
         end if
 
         ! Accumulate v time averages: same range as vhbt
-        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l - 1) then
+        if (i >= is_l .and. i <= ie_l .and. j >= js_l - 1 .and. j <= je_l) then
             vbt_av(i, j) = vbt_av(i, j) + vbt(i, j) * inv_nstep
             vhbt_av(i, j) = vhbt_av(i, j) + vhbt(i, j) * inv_nstep
         end if
