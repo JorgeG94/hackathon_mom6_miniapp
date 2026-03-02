@@ -62,6 +62,10 @@ module mom6_types
         ! Direction alternation (for symmetry in split schemes)
         integer :: first_direction  ! 0 or 1, alternates each timestep
 
+        ! MPI domain offsets (global index of local (1,1); 0 for single-GPU)
+        integer :: i_offset = 0
+        integer :: j_offset = 0
+
         ! Memory tracking
         integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type ocean_grid_type
