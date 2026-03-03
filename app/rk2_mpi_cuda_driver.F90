@@ -87,6 +87,7 @@ program rk2_mpi_cuda_driver
     integer :: npes_x, npes_y
     integer :: i, j, k, iter, istat, bt_n
     integer :: ierr, nprocs, local_rank, dims(2)
+    integer :: node_comm, node_rank
     real(dp) :: dt
     character(len=32) :: arg
 
@@ -95,8 +96,12 @@ program rk2_mpi_cuda_driver
     call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
     call MPI_Comm_rank(MPI_COMM_WORLD, local_rank, ierr)
 
-    ! Set CUDA device based on local rank (for multi-GPU nodes)
-    istat = cudaSetDevice(mod(local_rank, 8))
+    ! Get node-local rank for GPU device assignment
+    call MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, &
+                             MPI_INFO_NULL, node_comm, ierr)
+    call MPI_Comm_rank(node_comm, node_rank, ierr)
+    istat = cudaSetDevice(node_rank)
+    call MPI_Comm_free(node_comm, ierr)
 
     ! Default parameters
     ni = 180; nj = 180; nk = 75; niter = 10; bt_nsteps = 30

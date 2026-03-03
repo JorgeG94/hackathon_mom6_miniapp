@@ -82,15 +82,20 @@ program rk2_mpi_omp_driver
     integer :: iter, i, j, k, bt_n
     integer :: ierr, nprocs, dims(2)
     integer :: local_rank
+    integer :: node_comm, node_rank
     character(len=32) :: arg
 
     ! MPI initialization
     call MPI_Init(ierr)
     call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
-
-    ! GPU device selection: assign GPUs round-robin by MPI rank
     call MPI_Comm_rank(MPI_COMM_WORLD, local_rank, ierr)
-    !$ call omp_set_default_device(local_rank)
+
+    ! Get node-local rank for GPU device assignment
+    call MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, &
+                             MPI_INFO_NULL, node_comm, ierr)
+    call MPI_Comm_rank(node_comm, node_rank, ierr)
+    !$ call omp_set_default_device(node_rank)
+    call MPI_Comm_free(node_comm, ierr)
 
     ! Default parameters
     ni = 180; nj = 180; nk = 75; niter = 10; bt_nsteps = 30
