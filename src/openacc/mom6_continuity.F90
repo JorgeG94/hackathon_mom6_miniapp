@@ -384,8 +384,7 @@ contains
                                            visc_rem_u, dt, G, GV, por_face_areaU, use_visc_rem)
                 ! Write u_cor and du_cor from converged CS%du (explicit present to avoid optional arg bug)
                 if (present(u_cor)) then
-                    !$acc parallel loop collapse(3) &
-                    !$acc   present(u_cor, u, visc_rem_u, CS, CS%du)
+                    !$acc parallel loop collapse(3) default(present)
                     do k = 1, nz
                         do j = jsh, jeh
                             do I = ish - 1, ieh
@@ -399,8 +398,7 @@ contains
                     end do
                 end if
                 if (present(du_cor)) then
-                    !$acc parallel loop collapse(2) &
-                    !$acc   present(du_cor, CS, CS%du)
+                    !$acc parallel loop collapse(2) default(present)
                     do j = jsh, jeh
                         do I = ish - 1, ieh
                             du_cor(I, j) = CS%du(I, j)
