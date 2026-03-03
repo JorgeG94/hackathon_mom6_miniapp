@@ -191,7 +191,7 @@ program rk2_mpi_cuda_driver
                              1.0e-4_dp, 1.0e-2_dp, 1.0e-2_dp, 50.0_dp, 10.0_dp)
 
     ! Horizontal viscosity CUDA init (direct from grid metrics, no OpenACC)
-    call hor_visc_init_cuda_from_grid(hvisc_CS, G, GV, nk, 100.0_dp)
+    call hor_visc_init_cuda_from_grid(hvisc_CS, G, nk, 100.0_dp)
 
     ! Allocate host arrays
     allocate(u_h(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -799,10 +799,9 @@ contains
     end subroutine check_bt_cfl
 
     !> Initialize CUDA hor_visc directly from grid metrics (no OpenACC)
-    subroutine hor_visc_init_cuda_from_grid(CS, G, GV_in, nk, Kh)
+    subroutine hor_visc_init_cuda_from_grid(CS, G, nk, Kh)
         type(hor_visc_CS_cuda), intent(inout) :: CS
         type(ocean_grid_type), intent(in) :: G
-        type(verticalGrid_type), intent(in) :: GV_in
         integer, intent(in) :: nk
         real(dp), intent(in) :: Kh
 
@@ -843,8 +842,8 @@ contains
             end do
         end do
 
-        ! h_neglect for numerical stability
-        h_neglect = max(GV_in%Angstrom_H, 1.0e-3_dp)
+        ! h_neglect for numerical stability (same as max(Angstrom_H, 1e-3))
+        h_neglect = 1.0e-3_dp
 
         ! Call the CUDA init with computed metrics
         call hor_visc_init_cuda(CS, isd, ied, jsd, jed, &
