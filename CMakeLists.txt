@@ -43,8 +43,9 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # Build options
 # =============================================================================
 
-option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" ON)
-option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants" ON)
+option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" ON)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" ON)
 option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
 option(MOM6_ENABLE_MODULE_DRIVERS "Build individual module drivers (continuity, coriolis, etc.)" OFF)
@@ -56,26 +57,39 @@ if(MOM6_ENABLE_CUDA_KERNELS)
   message(STATUS "CUDA Fortran kernels: ENABLED")
 endif()
 
+if(MOM6_ENABLE_OPENACC_KERNELS)
+  if(NOT CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+    message(FATAL_ERROR "MOM6_ENABLE_OPENACC_KERNELS requires the NVHPC (nvfortran) compiler")
+  endif()
+  message(STATUS "OpenACC kernels: ENABLED")
+endif()
+
 # =============================================================================
-# Module library (shared solvers — OpenACC)
+# Module library (shared solvers — OpenMP default backend)
 # =============================================================================
 
 add_library(mom6_modules STATIC)
 add_subdirectory(src/common)
-add_subdirectory(src/openacc)
+
+# OpenMP is the default portable backend (works on AMD, Intel, NVIDIA)
+if(MOM6_ENABLE_OMP_KERNELS)
+  message(STATUS "OpenMP target kernels: ENABLED (default backend)")
+  add_subdirectory(src/openmp)
+endif()
 
 set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
                                               ${CMAKE_BINARY_DIR}/mod)
-target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
+if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+  target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
+endif()
 target_include_directories(mom6_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
 
 # =============================================================================
-# OpenMP target offloading kernel library (opt-in)
+# OpenACC kernel library (opt-in, requires NVHPC)
 # =============================================================================
 
-if(MOM6_ENABLE_OMP_KERNELS)
-  message(STATUS "OpenMP target kernels: ENABLED")
-  add_subdirectory(src/openmp)
+if(MOM6_ENABLE_OPENACC_KERNELS)
+  add_subdirectory(src/openacc)
 endif()
 
 # =============================================================================
@@ -93,23 +107,25 @@ endif()
 if(MOM6_ENABLE_SINGLE_GPU_DRIVERS)
   message(STATUS "Single-GPU drivers: ENABLED")
 
-  # OpenACC single-GPU driver
-  add_executable(rk2_driver app/rk2_driver.F90)
-  target_link_libraries(rk2_driver PRIVATE mom6_modules)
+  # OpenACC single-GPU driver (requires OPENACC kernels)
+  if(MOM6_ENABLE_OPENACC_KERNELS)
+    add_executable(rk2_driver app/rk2_driver.F90)
+    target_link_libraries(rk2_driver PRIVATE mom6_modules)
 
-  set(OPENACC_DRIVERS rk2_driver)
+    set(OPENACC_DRIVERS rk2_driver)
 
-  if(MOM6_ENABLE_MODULE_DRIVERS)
-    set(MODULE_DRIVERS
-      continuity_driver coriolis_driver barotropic_driver
-      vert_visc_driver hor_visc_driver)
+    if(MOM6_ENABLE_MODULE_DRIVERS)
+      set(MODULE_DRIVERS
+        continuity_driver coriolis_driver barotropic_driver
+        vert_visc_driver hor_visc_driver)
 
-    foreach(drv ${MODULE_DRIVERS})
-      add_executable(${drv} app/module_drivers/${drv}.F90)
-      target_link_libraries(${drv} PRIVATE mom6_modules)
-    endforeach()
+      foreach(drv ${MODULE_DRIVERS})
+        add_executable(${drv} app/module_drivers/${drv}.F90)
+        target_link_libraries(${drv} PRIVATE mom6_modules)
+      endforeach()
 
-    list(APPEND OPENACC_DRIVERS ${MODULE_DRIVERS})
+      list(APPEND OPENACC_DRIVERS ${MODULE_DRIVERS})
+    endif()
   endif()
 
   # CUDA single-GPU driver
@@ -149,7 +165,7 @@ if(MOM6_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS Fortran)
   message(STATUS "MPI Fortran: ENABLED (${MPI_Fortran_COMPILER})")
 
-  # MPI infrastructure library (domain decomposition + OpenACC halo exchange)
+  # MPI infrastructure library (domain decomposition + halo exchange)
   add_library(mom6_mpi_modules STATIC
     src/common/mom6_mpi_domain.F90
     src/common/mom6_mpi_halo.F90)
@@ -159,9 +175,11 @@ if(MOM6_ENABLE_MPI)
   target_include_directories(mom6_mpi_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
   target_link_libraries(mom6_mpi_modules PUBLIC mom6_modules MPI::MPI_Fortran)
 
-  # OpenACC MPI driver
-  add_executable(rk2_mpi_driver app/rk2_mpi_driver.F90)
-  target_link_libraries(rk2_mpi_driver PRIVATE mom6_modules mom6_mpi_modules MPI::MPI_Fortran)
+  # OpenACC MPI driver (requires OpenACC kernels)
+  if(MOM6_ENABLE_OPENACC_KERNELS)
+    add_executable(rk2_mpi_driver app/rk2_mpi_driver.F90)
+    target_link_libraries(rk2_mpi_driver PRIVATE mom6_modules mom6_mpi_modules MPI::MPI_Fortran)
+  endif()
 
   # CUDA MPI (requires both MPI and CUDA enabled)
   if(MOM6_ENABLE_CUDA_KERNELS)
@@ -223,8 +241,9 @@ message(
   STATUS
     "Fortran compiler: ${CMAKE_Fortran_COMPILER_ID} (${CMAKE_Fortran_COMPILER})"
 )
+message(STATUS "OpenMP target:    ${MOM6_ENABLE_OMP_KERNELS} (default backend)")
+message(STATUS "OpenACC kernels:  ${MOM6_ENABLE_OPENACC_KERNELS}")
 message(STATUS "CUDA kernels:     ${MOM6_ENABLE_CUDA_KERNELS}")
-message(STATUS "OMP target:       ${MOM6_ENABLE_OMP_KERNELS}")
 message(STATUS "MPI parallel:     ${MOM6_ENABLE_MPI}")
 message(STATUS "Single-GPU:       ${MOM6_ENABLE_SINGLE_GPU_DRIVERS}")
 message(STATUS "Module drivers:   ${MOM6_ENABLE_MODULE_DRIVERS}")
