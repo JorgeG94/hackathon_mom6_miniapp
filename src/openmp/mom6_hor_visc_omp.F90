@@ -48,6 +48,7 @@ module mom6_hor_visc_omp
         logical :: better_bound_Ah = .false. ! Use thickness-aware Ah bounding
         logical :: use_land_mask = .true.   ! Use land mask for thickness interpolation
         logical :: modified_Leith = .false. ! Include divergence gradient in Leith
+        logical :: use_fused_kernels = .false. ! Use memory-efficient fused kernels (Laplacian-only)
 
         !----- Scalar parameters -----
         real(dp) :: Kh_bg_min = 0.0_dp      ! Minimum background Kh [L2 T-1]
@@ -207,6 +208,17 @@ contains
         CS%h_neglect = max(GV%Angstrom_H, 1.0e-3_dp)
         CS%nk = GV%ke
 
+        ! Determine if we can use memory-efficient fused kernels
+        ! Fused mode: Laplacian-only, no biharmonic/Smagorinsky/Leith/better_bound
+        CS%use_fused_kernels = CS%Laplacian .and. &
+                               .not. CS%biharmonic .and. &
+                               .not. CS%Smagorinsky_Kh .and. &
+                               .not. CS%Smagorinsky_Ah .and. &
+                               .not. CS%Leith_Kh .and. &
+                               .not. CS%Leith_Ah .and. &
+                               .not. CS%better_bound_Kh .and. &
+                               .not. CS%better_bound_Ah
+
         ! Allocate all arrays
         call allocate_hor_visc_arrays(CS, G, GV%ke)
 
@@ -270,12 +282,15 @@ contains
             end do
         end do
 
-        ! Initialize always-needed work arrays to zero
-        CS%dudx = 0.0_dp; CS%dvdy = 0.0_dp; CS%dvdx = 0.0_dp; CS%dudy = 0.0_dp
-        CS%sh_xx = 0.0_dp; CS%sh_xy = 0.0_dp
+        ! Initialize work arrays to zero (only those that are allocated)
         CS%str_xx = 0.0_dp; CS%str_xy = 0.0_dp
-        CS%h_u = 0.0_dp; CS%h_v = 0.0_dp; CS%hq = 0.0_dp
-        CS%Kh = 0.0_dp
+
+        if (.not. CS%use_fused_kernels) then
+            CS%dudx = 0.0_dp; CS%dvdy = 0.0_dp; CS%dvdx = 0.0_dp; CS%dudy = 0.0_dp
+            CS%sh_xx = 0.0_dp; CS%sh_xy = 0.0_dp
+            CS%h_u = 0.0_dp; CS%h_v = 0.0_dp; CS%hq = 0.0_dp
+            CS%Kh = 0.0_dp
+        end if
 
         if (CS%biharmonic) then
             CS%Ah = 0.0_dp; CS%Del2u = 0.0_dp; CS%Del2v = 0.0_dp
@@ -304,10 +319,15 @@ contains
         !$omp target enter data map(to: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target enter data map(to: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
         !$omp target enter data map(to: CS%reduction_xx, CS%reduction_xy)
-        !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
-        !$omp target enter data map(alloc: CS%Kh)
+        !$omp target enter data map(alloc: CS%str_xx, CS%str_xy)
+
+        if (.not. CS%use_fused_kernels) then
+            ! Full mode: transfer all intermediate work arrays
+            !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+            !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy)
+            !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
+            !$omp target enter data map(alloc: CS%Kh)
+        end if
 
         if (CS%biharmonic) then
             !$omp target enter data map(to: CS%Ah_bg_xx, CS%Ah_bg_xy)
@@ -365,21 +385,28 @@ contains
         allocate (CS%reduction_xx(isd:ied, jsd:jed))
         allocate (CS%reduction_xy(isd:ied, jsd:jed))
 
-        ! Always-needed: core work arrays (3D for k-parallelism)
-        allocate (CS%dudx(isd:ied, jsd:jed, nk))
-        allocate (CS%dvdy(isd:ied, jsd:jed, nk))
-        allocate (CS%dvdx(isd:ied, jsd:jed, nk))
-        allocate (CS%dudy(isd:ied, jsd:jed, nk))
-        allocate (CS%sh_xx(isd:ied, jsd:jed, nk))
-        allocate (CS%sh_xy(isd:ied, jsd:jed, nk))
+        ! Stress tensors are always needed (for divergence computation)
         allocate (CS%str_xx(isd:ied, jsd:jed, nk))
         allocate (CS%str_xy(isd:ied, jsd:jed, nk))
-        allocate (CS%h_u(isd:ied, jsd:jed, nk))
-        allocate (CS%h_v(isd:ied, jsd:jed, nk))
-        allocate (CS%hq(isd:ied, jsd:jed, nk))
-        allocate (CS%Kh(isd:ied, jsd:jed, nk))
 
-        n2d = 14; n3d = 12
+        if (CS%use_fused_kernels) then
+            ! Fused mode: only str_xx/str_xy needed on GPU
+            ! Intermediate values computed as private scalars in fused kernels
+            n2d = 14; n3d = 2
+        else
+            ! Full mode: allocate all work arrays for multi-kernel approach
+            allocate (CS%dudx(isd:ied, jsd:jed, nk))
+            allocate (CS%dvdy(isd:ied, jsd:jed, nk))
+            allocate (CS%dvdx(isd:ied, jsd:jed, nk))
+            allocate (CS%dudy(isd:ied, jsd:jed, nk))
+            allocate (CS%sh_xx(isd:ied, jsd:jed, nk))
+            allocate (CS%sh_xy(isd:ied, jsd:jed, nk))
+            allocate (CS%h_u(isd:ied, jsd:jed, nk))
+            allocate (CS%h_v(isd:ied, jsd:jed, nk))
+            allocate (CS%hq(isd:ied, jsd:jed, nk))
+            allocate (CS%Kh(isd:ied, jsd:jed, nk))
+            n2d = 14; n3d = 12
+        end if
 
         ! Biharmonic arrays
         if (CS%biharmonic) then
@@ -460,10 +487,15 @@ contains
         !$omp target exit data map(delete: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target exit data map(delete: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
         !$omp target exit data map(delete: CS%reduction_xx, CS%reduction_xy)
-        !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
-        !$omp target exit data map(delete: CS%Kh)
+        !$omp target exit data map(delete: CS%str_xx, CS%str_xy)
+
+        ! Conditional exit for work arrays (only allocated in full mode)
+        if (allocated(CS%dudx)) then
+            !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+            !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy)
+            !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
+            !$omp target exit data map(delete: CS%Kh)
+        end if
 
         ! Conditional exit data for feature-specific arrays
         if (allocated(CS%Ah_bg_xx)) then
@@ -590,6 +622,12 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         Isq = is - 1; Ieq = ie; Jsq = js - 1; Jeq = je
         h_neglect = CS%h_neglect
+
+        ! Use memory-efficient fused kernels for simple Laplacian mode
+        if (CS%use_fused_kernels) then
+            call hor_visc_fused(u, v, h, diffu, diffv, G, GV, CS)
+            return
+        end if
 
         !$omp target data map(to: u, v, h) map(from: diffu, diffv)
 
@@ -1404,5 +1442,146 @@ contains
         !$omp end target data
 
     end subroutine hor_visc
+
+    !> Memory-efficient fused kernel implementation for Laplacian-only viscosity
+    !!
+    !! All intermediate values (dudx, dvdy, dvdx, dudy, sh_xx, sh_xy, h_u, h_v, hq)
+    !! are computed inline as private scalars, never stored in global memory.
+    !! Only str_xx and str_xy are written to global memory.
+    !!
+    subroutine hor_visc_fused(u, v, h, diffu, diffv, G, GV, CS)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: v
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffu
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffv
+        type(hor_visc_CS), intent(inout) :: CS
+
+        ! Private scalars for fused computation (kept in registers)
+        real(dp) :: dudx_l, dvdy_l, sh_xx_l
+        real(dp) :: dvdx_l, dudy_l, sh_xy_l, hq_l
+        real(dp) :: h_u_l, h_v_l
+        real(dp) :: h_neglect
+
+        integer :: i, j, k, is, ie, js, je, nz, Isq, Ieq, Jsq, Jeq
+
+        is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
+        Isq = is - 1; Ieq = ie; Jsq = js - 1; Jeq = je
+        h_neglect = CS%h_neglect
+
+        !$omp target data map(to: u, v, h) map(from: diffu, diffv)
+
+        ! Initialize output to zero
+        !$omp target teams distribute parallel do collapse(3)
+        do k = 1, nz
+            do j = G%jsd, G%jed
+                do i = G%isd, G%ied
+                    diffu(i, j, k) = 0.0_dp
+                    diffv(i, j, k) = 0.0_dp
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 1: Compute str_xx at h-points
+        ! velocity gradients + strain + stress all in one pass
+        ! Intermediates (dudx, dvdy, sh_xx) stay in registers
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(dudx_l, dvdy_l, sh_xx_l)
+        do k = 1, nz
+            do j = Jsq, Jeq + 1
+                do i = Isq, Ieq + 1
+                    ! Velocity gradients (inline, register)
+                    dudx_l = CS%DY_dxT(i, j) * ((G%IdyCu(i, j) * u(i, j, k)) - &
+                                                 (G%IdyCu(i - 1, j) * u(i - 1, j, k)))
+                    dvdy_l = CS%DX_dyT(i, j) * ((G%IdxCv(i, j) * v(i, j, k)) - &
+                                                 (G%IdxCv(i, j - 1) * v(i, j - 1, k)))
+
+                    ! Strain tensor (inline, register)
+                    sh_xx_l = dudx_l - dvdy_l
+
+                    ! Stress tensor (write to global memory)
+                    CS%str_xx(i, j, k) = -CS%Kh_bg_xx(i, j) * sh_xx_l * &
+                                          h(i, j, k) * CS%reduction_xx(i, j)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 2: Compute str_xy at q-points
+        ! velocity gradients + strain + thickness + stress all in one pass
+        ! Intermediates (dvdx, dudy, sh_xy, hq) stay in registers
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(dvdx_l, dudy_l, sh_xy_l, hq_l)
+        do k = 1, nz
+            do J = Jsq, Jeq
+                do I = Isq, Ieq
+                    ! Velocity gradients (inline, register)
+                    dvdx_l = CS%DY_dxBu(I, J) * ((v(i + 1, J, k) * G%IdyCv(i + 1, J)) - &
+                                                  (v(i, J, k) * G%IdyCv(i, J)))
+                    dudy_l = CS%DX_dyBu(I, J) * ((u(I, j + 1, k) * G%IdxCu(I, j + 1)) - &
+                                                  (u(I, j, k) * G%IdxCu(I, j)))
+
+                    ! Strain tensor with free-slip BC (inline, register)
+                    sh_xy_l = G%mask2dBu(I, J) * (dvdx_l + dudy_l)
+
+                    ! Thickness at q-point (inline, register)
+                    hq_l = 0.25_dp * ((h(i, j, k) + h(i + 1, j + 1, k)) + &
+                                       (h(i + 1, j, k) + h(i, j + 1, k)))
+
+                    ! Stress tensor (write to global memory)
+                    CS%str_xy(I, J, k) = -CS%Kh_bg_xy(I, J) * sh_xy_l * &
+                                          hq_l * G%mask2dBu(I, J) * CS%reduction_xy(I, J)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 3: Compute diffu with h_u inline
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(h_u_l)
+        do k = 1, nz
+            do j = js, je
+                do I = Isq, Ieq
+                    ! Thickness at u-point (inline, register)
+                    h_u_l = 0.5_dp * (G%mask2dT(i, j) * h(i, j, k) + &
+                                       G%mask2dT(i + 1, j) * h(i + 1, j, k))
+
+                    ! Viscous acceleration
+                    diffu(I, j, k) = ((G%IdxCu(I, j) * ((CS%dx2q(I, j - 1) * CS%str_xy(I, j - 1, k)) - &
+                                                         (CS%dx2q(I, j) * CS%str_xy(I, j, k))) + &
+                                       G%IdyCu(I, j) * ((CS%dy2h(i, j) * CS%str_xx(i, j, k)) - &
+                                                         (CS%dy2h(i + 1, j) * CS%str_xx(i + 1, j, k)))) * &
+                                      G%IareaCu(I, j)) / (h_u_l + h_neglect)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 4: Compute diffv with h_v inline
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(h_v_l)
+        do k = 1, nz
+            do J = Jsq, Jeq
+                do i = is, ie
+                    ! Thickness at v-point (inline, register)
+                    h_v_l = 0.5_dp * (G%mask2dT(i, j) * h(i, j, k) + &
+                                       G%mask2dT(i, j + 1) * h(i, j + 1, k))
+
+                    ! Viscous acceleration
+                    diffv(i, J, k) = ((G%IdyCv(i, J) * ((CS%dy2q(i - 1, J) * CS%str_xy(i - 1, J, k)) - &
+                                                         (CS%dy2q(i, J) * CS%str_xy(i, J, k))) - &
+                                       G%IdxCv(i, J) * ((CS%dx2h(i, j) * CS%str_xx(i, j, k)) - &
+                                                         (CS%dx2h(i, j + 1) * CS%str_xx(i, j + 1, k)))) * &
+                                      G%IareaCv(i, J)) / (h_v_l + h_neglect)
+                end do
+            end do
+        end do
+
+        !$omp end target data
+
+    end subroutine hor_visc_fused
 
 end module mom6_hor_visc_omp
