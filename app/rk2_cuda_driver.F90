@@ -36,7 +36,6 @@ program rk2_cuda_driver
 
     ! OpenACC modules used ONLY for metric extraction
     use mom6_barotropic, only: barotropic_CS, barotropic_init, barotropic_end
-    use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc_end
     implicit none
 
 
@@ -53,7 +52,6 @@ program rk2_cuda_driver
 
     ! OpenACC control structures (metric extraction only)
     type(barotropic_CS) :: bt_CS_acc
-    type(hor_visc_CS)   :: hvisc_CS_acc
 
     ! Host 3D state arrays
     real(dp), allocatable :: u_h(:,:,:), v_h(:,:,:)
@@ -176,21 +174,8 @@ program rk2_cuda_driver
                              G%mask2dCu, G%mask2dCv, &
                              1.0e-4_dp, 1.0e-2_dp, 1.0e-2_dp, 50.0_dp, 10.0_dp)
 
-    ! --- Horizontal viscosity: use OpenACC init for metric extraction, then CUDA init ---
-    ! Free OpenACC device memory immediately after CUDA init copies what it needs
-    call hor_visc_init(hvisc_CS_acc, G, GV, Kh=100.0_dp)
-    call hor_visc_init_cuda(hvisc_CS, G%isd, G%ied, G%jsd, G%jed, &
-                            G%isc, G%iec, G%jsc, G%jec, nk, &
-                            100.0_dp, hvisc_CS_acc%h_neglect, &
-                            hvisc_CS_acc%DY_dxT, hvisc_CS_acc%DX_dyT, &
-                            hvisc_CS_acc%DY_dxBu, hvisc_CS_acc%DX_dyBu, &
-                            G%IdyCu, G%IdxCu, G%IdyCv, G%IdxCv, &
-                            G%IareaCu, G%IareaCv, &
-                            G%mask2dT, G%mask2dBu, &
-                            hvisc_CS_acc%reduction_xx, hvisc_CS_acc%reduction_xy, &
-                            hvisc_CS_acc%dy2h, hvisc_CS_acc%dx2h, &
-                            hvisc_CS_acc%dy2q, hvisc_CS_acc%dx2q)
-    call hor_visc_end(hvisc_CS_acc)
+    ! --- Horizontal viscosity CUDA init (direct from grid metrics, no OpenACC) ---
+    call hor_visc_init_cuda_from_grid(hvisc_CS, G, GV, nk, 100.0_dp)
 
     ! --- Allocate host arrays ---
     allocate (u_h(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -692,5 +677,71 @@ contains
             print '(A)', '  CFL OK'
         end if
     end subroutine check_bt_cfl
+
+    !> Initialize CUDA hor_visc directly from grid metrics (no OpenACC)
+    subroutine hor_visc_init_cuda_from_grid(CS, G, GV_in, nk, Kh)
+        type(hor_visc_CS_cuda), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV_in
+        integer, intent(in) :: nk
+        real(dp), intent(in) :: Kh
+
+        real(dp), allocatable :: DY_dxT(:,:), DX_dyT(:,:)
+        real(dp), allocatable :: DY_dxBu(:,:), DX_dyBu(:,:)
+        real(dp), allocatable :: reduction_xx(:,:), reduction_xy(:,:)
+        real(dp), allocatable :: dy2h(:,:), dx2h(:,:), dy2q(:,:), dx2q(:,:)
+        real(dp) :: h_neglect
+        integer :: i, j, isd, ied, jsd, jed
+
+        isd = G%isd; ied = G%ied; jsd = G%jsd; jed = G%jed
+
+        ! Allocate temporary host arrays for metric computation
+        allocate(DY_dxT(isd:ied, jsd:jed), DX_dyT(isd:ied, jsd:jed))
+        allocate(DY_dxBu(isd:ied, jsd:jed), DX_dyBu(isd:ied, jsd:jed))
+        allocate(reduction_xx(isd:ied, jsd:jed), reduction_xy(isd:ied, jsd:jed))
+        allocate(dy2h(isd:ied, jsd:jed), dx2h(isd:ied, jsd:jed))
+        allocate(dy2q(isd:ied, jsd:jed), dx2q(isd:ied, jsd:jed))
+
+        ! Compute metrics directly from grid
+        do j = jsd, jed
+            do i = isd, ied
+                ! Metric ratios
+                DX_dyT(i,j) = G%dxT(i,j) * G%IdyT(i,j)
+                DY_dxT(i,j) = G%dyT(i,j) * G%IdxT(i,j)
+                DX_dyBu(i,j) = G%dxBu(i,j) * G%IdyBu(i,j)
+                DY_dxBu(i,j) = G%dyBu(i,j) * G%IdxBu(i,j)
+
+                ! Grid spacing squared
+                dx2h(i,j) = G%dxT(i,j) * G%dxT(i,j)
+                dy2h(i,j) = G%dyT(i,j) * G%dyT(i,j)
+                dx2q(i,j) = G%dxBu(i,j) * G%dxBu(i,j)
+                dy2q(i,j) = G%dyBu(i,j) * G%dyBu(i,j)
+
+                ! Reduction factors (1.0 for uniform grid)
+                reduction_xx(i,j) = 1.0_dp
+                reduction_xy(i,j) = 1.0_dp
+            end do
+        end do
+
+        ! h_neglect for numerical stability
+        h_neglect = max(GV_in%Angstrom_H, 1.0e-3_dp)
+
+        ! Call the CUDA init with computed metrics
+        call hor_visc_init_cuda(CS, isd, ied, jsd, jed, &
+                                G%isc, G%iec, G%jsc, G%jec, nk, &
+                                Kh, h_neglect, &
+                                DY_dxT, DX_dyT, DY_dxBu, DX_dyBu, &
+                                G%IdyCu, G%IdxCu, G%IdyCv, G%IdxCv, &
+                                G%IareaCu, G%IareaCv, &
+                                G%mask2dT, G%mask2dBu, &
+                                reduction_xx, reduction_xy, &
+                                dy2h, dx2h, dy2q, dx2q)
+
+        ! Free temporary host arrays
+        deallocate(DY_dxT, DX_dyT, DY_dxBu, DX_dyBu)
+        deallocate(reduction_xx, reduction_xy)
+        deallocate(dy2h, dx2h, dy2q, dx2q)
+
+    end subroutine hor_visc_init_cuda_from_grid
 
 end program rk2_cuda_driver
