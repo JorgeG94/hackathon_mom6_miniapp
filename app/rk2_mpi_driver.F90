@@ -9,7 +9,7 @@
 !!        If npes_x/npes_y omitted, auto-decomposed via MPI_Dims_create
 !!
 program rk2_mpi_driver
-    use mpi_f08
+    use mpi
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
                           end_ocean_grid, G_EARTH, BT_cont_type, &
@@ -82,15 +82,20 @@ program rk2_mpi_driver
     integer :: iter, i, j, k, bt_n
     integer :: ierr, nprocs, dims(2)
     integer :: local_rank
+    integer :: node_comm, node_rank
     character(len=32) :: arg
 
     ! MPI initialization
     call MPI_Init(ierr)
     call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
-
-    ! GPU device selection: assign GPUs round-robin by MPI rank
     call MPI_Comm_rank(MPI_COMM_WORLD, local_rank, ierr)
-    !$acc set device_num(local_rank)
+
+    ! Get node-local rank for GPU device assignment
+    call MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, &
+                             MPI_INFO_NULL, node_comm, ierr)
+    call MPI_Comm_rank(node_comm, node_rank, ierr)
+    !$acc set device_num(node_rank)
+    call MPI_Comm_free(node_comm, ierr)
 
     ! Default parameters
     ni = 180; nj = 180; nk = 75; niter = 10; bt_nsteps = 30
