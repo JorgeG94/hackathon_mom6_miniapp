@@ -7,20 +7,28 @@ program continuity_cuda_driver
     use iso_fortran_env, only: dp => real64
     use cudafor
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          init_ocean_grid, init_verticalGrid, end_ocean_grid
+                          init_ocean_grid, init_verticalGrid, end_ocean_grid, PI
     use mom6_continuity_cuda, only: continuity_CS_cuda, continuity_init_cuda, &
-                                     continuity_PPM_cuda, continuity_end_cuda
+                                     continuity_PPM_cuda, continuity_end_cuda, &
+                                     BT_cont_type_cuda, alloc_BT_cont_type_cuda, &
+                                     dealloc_BT_cont_type_cuda
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end
     implicit none
 
     type(ocean_grid_type)    :: G
     type(verticalGrid_type)  :: GV
     type(continuity_CS_cuda) :: CS_cuda
+    type(cuda_workspace_type) :: ws
 
     ! Host state arrays
     real(dp), allocatable :: hin(:,:,:), h(:,:,:), u(:,:,:), uh(:,:,:)
 
     ! Device arrays
     real(dp), device, allocatable :: u_d(:,:,:), hin_d(:,:,:), h_d(:,:,:), uh_d(:,:,:)
+
+    ! Device arrays for full continuity solver
+    real(dp), device, allocatable :: uhbt_cont_d(:,:)
+    type(BT_cont_type_cuda) :: BT_cont_cuda
 
     real(dp) :: dt, t_start, t_end, t_cuda
     integer  :: ni, nj, nk, niter, iter, i, j, k
@@ -59,7 +67,8 @@ program continuity_cuda_driver
     ! ---- Initialize CUDA continuity solver ----
     call continuity_init_cuda(CS_cuda, G%isd, G%ied, G%jsd, G%jed, &
                               G%isc, G%iec, G%jsc, G%jec, nk, &
-                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true.)
+                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true., &
+                              G%dxT, G%areaT, G%dxCu, G%mask2dCu)
 
     ! ---- Allocate host state arrays ----
     allocate(hin(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -72,16 +81,23 @@ program continuity_cuda_driver
     allocate(hin_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(h_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(uh_d(G%isd:G%ied, G%jsd:G%jed, nk))
+    ! Full continuity solver device arrays
+    allocate(uhbt_cont_d(G%isd:G%ied, G%jsd:G%jed))
+    uhbt_cont_d = 0.0_dp
+    call alloc_BT_cont_type_cuda(BT_cont_cuda, G%isd, G%ied, G%jsd, G%jed, nk)
+
+    ! Initialize workspace pool (3 3D + 6 2D slots for continuity scratch)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 3, 6)
 
     ! ---- Initialize state with realistic patterns ----
     do k = 1, nk
         do j = G%jsd, G%jed
             do i = G%isd, G%ied
                 hin(i, j, k) = 4000.0_dp/real(nk, dp) + &
-                    10.0_dp * sin(real(i - 1, dp)/real(ni, dp) * 3.14159_dp) * &
-                    cos(real(j - 1, dp)/real(nj, dp) * 3.14159_dp) * exp(-real(k, dp)/20.0_dp)
+                    10.0_dp * sin(real(i - 1, dp)/real(ni, dp) * PI) * &
+                    cos(real(j - 1, dp)/real(nj, dp) * PI) * exp(-real(k, dp)/20.0_dp)
                 h(i, j, k) = hin(i, j, k)
-                u(i, j, k) = 0.1_dp * sin(real(j - 1, dp)/real(nj, dp) * 3.14159_dp * 2.0_dp) * &
+                u(i, j, k) = 0.1_dp * sin(real(j - 1, dp)/real(nj, dp) * PI * 2.0_dp) * &
                     exp(-real(k, dp)/30.0_dp)
             end do
         end do
@@ -95,7 +111,8 @@ program continuity_cuda_driver
     ! ---- Warmup ----
     print '(A)', ''
     print '(A)', 'Warming up CUDA kernels...'
-    call continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS_cuda)
+    call continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS_cuda, ws, &
+                             uhbt_cont_d, BT_cont_cuda)
 
     ! ---- Benchmark ----
     print '(A)', 'Benchmarking CUDA continuity PPM...'
@@ -106,7 +123,8 @@ program continuity_cuda_driver
         h_d = hin
 
         t_start = omp_get_wtime()
-        call continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS_cuda)
+        call continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS_cuda, ws, &
+                                 uhbt_cont_d, BT_cont_cuda)
         t_end = omp_get_wtime()
         t_cuda = t_cuda + (t_end - t_start)
     end do
@@ -133,10 +151,13 @@ program continuity_cuda_driver
     print '(A)', '================================================================'
 
     ! ---- Cleanup ----
+    call workspace_end(ws)
+    call dealloc_BT_cont_type_cuda(BT_cont_cuda)
     call continuity_end_cuda(CS_cuda)
     call end_ocean_grid(G)
     deallocate(hin, h, u, uh)
     deallocate(u_d, hin_d, h_d, uh_d)
+    deallocate(uhbt_cont_d)
 
 contains
 

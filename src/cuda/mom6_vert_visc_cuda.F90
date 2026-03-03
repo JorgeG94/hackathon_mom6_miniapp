@@ -18,6 +18,7 @@
 module mom6_vert_visc_cuda
     use cudafor
     use iso_fortran_env, only: dp => real64
+    use cuda_workspace, only: cuda_workspace_type
     implicit none
     private
 
@@ -35,19 +36,9 @@ module mom6_vert_visc_cuda
         ! Viscosity parameters (scalars, host-side)
         real(dp) :: Kv, Kv_extra_bbl, Hmix, Hbbl, Kv_ml
 
-        ! Output arrays on device
-        real(dp), device, allocatable :: visc_rem_u(:,:,:)  ! (isd:ied, jsd:jed, nz)
-        real(dp), device, allocatable :: visc_rem_v(:,:,:)
-        real(dp), device, allocatable :: taux_bot(:,:)      ! (isd:ied, jsd:jed)
-        real(dp), device, allocatable :: tauy_bot(:,:)
-
         ! Grid metrics on device (2D, copied once at init)
         real(dp), device, allocatable :: mask2dCu_d(:,:)
         real(dp), device, allocatable :: mask2dCv_d(:,:)
-
-        ! Pre-allocated workspace for tridiagonal column solver (eliminates GPU heap)
-        real(dp), device, allocatable :: hvel_d(:,:,:)   ! (isd:ied, jsd:jed, nz)
-        real(dp), device, allocatable :: z_i_d(:,:,:)    ! (isd:ied, jsd:jed, nz+1)
     end type vert_visc_CS_cuda
 
 contains
@@ -380,21 +371,9 @@ contains
         CS%Hmix = Hmix
         CS%Hbbl = Hbbl
 
-        ! Allocate 3D device output arrays
-        allocate(CS%visc_rem_u(isd:ied, jsd:jed, nk))
-        allocate(CS%visc_rem_v(isd:ied, jsd:jed, nk))
-
-        ! Allocate 2D device output arrays
-        allocate(CS%taux_bot(isd:ied, jsd:jed))
-        allocate(CS%tauy_bot(isd:ied, jsd:jed))
-
         ! Allocate 2D device grid metrics and copy from host
         allocate(CS%mask2dCu_d(isd:ied, jsd:jed)); CS%mask2dCu_d = mask2dCu
         allocate(CS%mask2dCv_d(isd:ied, jsd:jed)); CS%mask2dCv_d = mask2dCv
-
-        ! Pre-allocate workspace for tridiagonal column solver
-        allocate(CS%hvel_d(isd:ied, jsd:jed, nk))
-        allocate(CS%z_i_d(isd:ied, jsd:jed, nk+1))
 
         CS%initialized = .true.
 
@@ -403,7 +382,7 @@ contains
     !> Launch fused coef+remnant+apply kernels for both u and v points.
     !! u_d, v_d are device arrays (inout), h_d is device (in),
     !! taux_d, tauy_d are device surface stress arrays (in).
-    subroutine vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS, taux_d, tauy_d, bx_in, by_in)
+    subroutine vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS, taux_d, tauy_d, ws, bx_in, by_in)
         type(vert_visc_CS_cuda), intent(inout) :: CS
         real(dp), device, intent(inout) :: u_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(inout) :: v_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
@@ -411,6 +390,7 @@ contains
         real(dp), intent(in)            :: dt
         real(dp), device, intent(in)    :: taux_d(CS%isd:CS%ied, CS%jsd:CS%jed)
         real(dp), device, intent(in)    :: tauy_d(CS%isd:CS%ied, CS%jsd:CS%jed)
+        type(cuda_workspace_type), intent(inout) :: ws
         integer, intent(in), optional   :: bx_in, by_in
 
         integer :: n1, n2, nz, is_l, ie_l, js_l, je_l, istat, bx, by
@@ -443,20 +423,22 @@ contains
         grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), 1)
 
         ! Launch u-points kernel
+        ! ws slots: 1=hvel, 2=z_i(nz+1), 3=visc_rem_u(discard), 2D slot 1=taux_bot(discard)
         call vert_visc_cra_u_kernel<<<grid, tBlock>>>( &
-            u_d, h_d, CS%mask2dCu_d, CS%visc_rem_u, CS%taux_bot, taux_d, &
+            u_d, h_d, CS%mask2dCu_d, ws%s3d(:,:,1:nz,3), ws%s2d(:,:,1), taux_d, &
             CS%Kv, CS%Kv_ml, CS%Kv_extra_bbl, CS%Hmix, CS%Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
             n1, n2, nz, is_l, ie_l, js_l, je_l, &
-            CS%hvel_d, CS%z_i_d)
+            ws%s3d(:,:,1:nz,1), ws%s3d(:,:,:,2))
 
         ! Launch v-points kernel
+        ! ws slots: 1=hvel(reused), 2=z_i(reused), 4=visc_rem_v(discard), 2D slot 2=tauy_bot(discard)
         call vert_visc_cra_v_kernel<<<grid, tBlock>>>( &
-            v_d, h_d, CS%mask2dCv_d, CS%visc_rem_v, CS%tauy_bot, tauy_d, &
+            v_d, h_d, CS%mask2dCv_d, ws%s3d(:,:,1:nz,4), ws%s2d(:,:,2), tauy_d, &
             CS%Kv, CS%Kv_ml, CS%Kv_extra_bbl, CS%Hmix, CS%Hbbl, &
             dt, dt_Rho0, h_neglect, I_Hbbl, &
             n1, n2, nz, is_l, ie_l, js_l, je_l, &
-            CS%hvel_d, CS%z_i_d)
+            ws%s3d(:,:,1:nz,1), ws%s3d(:,:,:,2))
 
         ! Sync to ensure all output is ready before returning
         istat = cudaDeviceSynchronize()
@@ -470,14 +452,8 @@ contains
 
         if (.not. CS%initialized) return
 
-        if (allocated(CS%visc_rem_u)) deallocate(CS%visc_rem_u)
-        if (allocated(CS%visc_rem_v)) deallocate(CS%visc_rem_v)
-        if (allocated(CS%taux_bot)) deallocate(CS%taux_bot)
-        if (allocated(CS%tauy_bot)) deallocate(CS%tauy_bot)
         if (allocated(CS%mask2dCu_d)) deallocate(CS%mask2dCu_d)
         if (allocated(CS%mask2dCv_d)) deallocate(CS%mask2dCv_d)
-        if (allocated(CS%hvel_d)) deallocate(CS%hvel_d)
-        if (allocated(CS%z_i_d)) deallocate(CS%z_i_d)
 
         CS%initialized = .false.
 

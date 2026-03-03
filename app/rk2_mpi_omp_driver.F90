@@ -12,8 +12,8 @@ program rk2_mpi_omp_driver
     use iso_fortran_env, only: dp => real64, int64
     use omp_lib, only: omp_set_default_device
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          end_ocean_grid, G_EARTH, BT_cont_type, &
-                          alloc_BT_cont_type, &
+                          end_ocean_grid, G_EARTH, HALO_WIDTH, PI, &
+                          BT_cont_type, alloc_BT_cont_type, &
                           mech_forcing_type, vertvisc_type, &
                           init_mech_forcing, end_mech_forcing, &
                           init_vertvisc_visc, end_vertvisc_visc
@@ -203,13 +203,13 @@ program rk2_mpi_omp_driver
     !$omp target update to(visc%Ray_u, visc%Ray_v)
 
     ! Initial halo exchange to fill halos before first iteration
-    call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d(h0, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+    call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d(h0, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
 
     call profiler_stop("Initialization")
     call system_clock(init_clock_end)
@@ -260,8 +260,8 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange: uh, vh needed by Coriolis
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -328,8 +328,8 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange: up, vp needed by corrector continuity
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(up, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_3d(vp, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+            call halo_exchange_3d(up, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(vp, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -344,7 +344,7 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange after predictor: h, uh needed by corrector
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -358,8 +358,8 @@ program rk2_mpi_omp_driver
             call profiler_stop("Transports")
 
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -443,12 +443,12 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange after corrector for next iteration
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-            call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-            call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-            call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+            call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+            call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+            call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -539,6 +539,7 @@ contains
         total_depth = 4000.0_dp
         halo = MD%halo
 
+        !$omp parallel do collapse(3) private(i,j,k,i_global,j_global)
         do k = 1, GV%ke
           do j = G%jsd, G%jed
             do i = G%isd, G%ied
@@ -546,28 +547,29 @@ contains
               j_global = j + MD%j_offset
 
               h0(i, j, k) = total_depth / real(GV%ke, dp) + &
-                            10.0_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * 3.14159_dp) * &
-                            cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * 3.14159_dp) * &
+                            10.0_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI) * &
+                            cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI) * &
                             exp(-real(k, dp) / 20.0_dp)
               h(i, j, k) = h0(i, j, k)
 
-              u(i, j, k) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * 3.14159_dp * 2.0_dp) * &
+              u(i, j, k) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI * 2.0_dp) * &
                            exp(-real(k, dp) / 30.0_dp)
-              v(i, j, k) = 0.1_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * 3.14159_dp * 2.0_dp) * &
+              v(i, j, k) = 0.1_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI * 2.0_dp) * &
                            exp(-real(k, dp) / 30.0_dp)
             end do
           end do
         end do
 
+        !$omp parallel do collapse(2) private(i,j,i_global,j_global)
         do j = G%jsd, G%jed
           do i = G%isd, G%ied
             i_global = i + MD%i_offset
             j_global = j + MD%j_offset
 
-            eta(i, j) = 0.5_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * 3.14159_dp * 2.0_dp) * &
-                        cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * 3.14159_dp * 2.0_dp)
-            ubt(i, j) = 0.05_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * 3.14159_dp)
-            vbt(i, j) = 0.05_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * 3.14159_dp)
+            eta(i, j) = 0.5_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI * 2.0_dp) * &
+                        cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI * 2.0_dp)
+            ubt(i, j) = 0.05_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI)
+            vbt(i, j) = 0.05_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI)
           end do
         end do
 
@@ -583,15 +585,17 @@ contains
 
         integer :: i, j, k, j_global
 
+        !$omp parallel do collapse(2) private(i,j,j_global)
         do j = G%jsd, G%jed
           do i = G%isd, G%ied
             j_global = j + MD%j_offset
-            forces%taux(i, j) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * 3.14159_dp)
+            forces%taux(i, j) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI)
             forces%tauy(i, j) = 0.0_dp
           end do
         end do
 
         if (visc%has_Rayleigh) then
+            !$omp parallel do collapse(3) private(i,j,k)
             do k = 1, GV%ke
               do j = G%jsd, G%jed
                 do i = G%isd, G%ied
@@ -600,6 +604,7 @@ contains
                 end do
               end do
             end do
+            !$omp parallel do collapse(2) private(i,j)
             do j = G%jsd, G%jed
               do i = G%isd, G%ied
                 visc%Ray_u(i, j, GV%ke) = 1.0e-4_dp

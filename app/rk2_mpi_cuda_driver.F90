@@ -9,18 +9,20 @@ program rk2_mpi_cuda_driver
     use cudafor
     use mpi
     use omp_lib, only: omp_get_wtime
-    use iso_fortran_env, only: dp => real64
+    use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          end_ocean_grid, G_EARTH
+                          G_EARTH, HALO_WIDTH, PI, OMEGA, EARTH_RADIUS
     use mom6_mpi_domain, only: mpi_domain_type, mpi_domain_init, &
-                               mpi_domain_end, init_ocean_grid_mpi
+                               mpi_domain_end
     use mom6_mpi_halo_cuda, only: halo_exchange_3d_cuda, halo_exchange_2d_cuda, halo_cleanup_cuda
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
 
     ! CUDA kernel modules
     use mom6_continuity_cuda, only: continuity_CS_cuda, continuity_init_cuda, &
-                                     continuity_PPM_cuda, continuity_end_cuda
+                                     continuity_PPM_cuda, continuity_end_cuda, &
+                                     BT_cont_type_cuda, alloc_BT_cont_type_cuda, &
+                                     dealloc_BT_cont_type_cuda
     use mom6_coriolis_cuda, only: coriolis_CS_cuda, coriolis_init_cuda, &
                                    CorAdCalc_cuda, coriolis_end_cuda, &
                                    SADOURNY75_ENERGY_CUDA
@@ -32,13 +34,10 @@ program rk2_mpi_cuda_driver
                                     vert_visc_cra_cuda, vert_visc_end_cuda
     use mom6_hor_visc_cuda, only: hor_visc_CS_cuda, hor_visc_init_cuda, &
                                    hor_visc_cuda, hor_visc_end_cuda
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end, workspace_copy_3d
 
-    ! OpenACC modules used ONLY for metric extraction
-    use mom6_barotropic, only: barotropic_CS, barotropic_init, barotropic_end
-    use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc_end
     implicit none
 
-    real(dp), parameter :: PI = 3.14159265358979_dp
 
     ! Grid structures
     type(ocean_grid_type) :: G
@@ -52,9 +51,8 @@ program rk2_mpi_cuda_driver
     type(vert_visc_CS_cuda)  :: visc_CS
     type(hor_visc_CS_cuda)   :: hvisc_CS
 
-    ! OpenACC control structures (metric extraction only)
-    type(barotropic_CS) :: bt_CS_acc
-    type(hor_visc_CS)   :: hvisc_CS_acc
+    ! Shared GPU workspace pool
+    type(cuda_workspace_type) :: ws
 
     ! Host arrays
     real(dp), allocatable :: u_h(:,:,:), v_h(:,:,:)
@@ -64,7 +62,7 @@ program rk2_mpi_cuda_driver
 
     ! Device 3D arrays
     real(dp), device, allocatable :: u_d(:,:,:), v_d(:,:,:)
-    real(dp), device, allocatable :: h_d(:,:,:), h0_d(:,:,:), htmp_d(:,:,:)
+    real(dp), device, allocatable :: h_d(:,:,:), h0_d(:,:,:)
     real(dp), device, allocatable :: uh_d(:,:,:), vh_d(:,:,:)
     real(dp), device, allocatable :: CAu_d(:,:,:), CAv_d(:,:,:)
     real(dp), device, allocatable :: up_d(:,:,:), vp_d(:,:,:)
@@ -75,6 +73,10 @@ program rk2_mpi_cuda_driver
     real(dp), device, allocatable :: ubt_av_d(:,:), vbt_av_d(:,:), eta_av_d(:,:)
     real(dp), device, allocatable :: taux_d(:,:), tauy_d(:,:)
     real(dp), device, allocatable :: dyCu_d(:,:), dxCv_d(:,:)
+
+    ! Device arrays for full continuity solver
+    real(dp), device, allocatable :: uhbt_cont_d(:,:)
+    type(BT_cont_type_cuda) :: BT_cont_cuda
 
     ! Timing
     real(dp) :: t_start, t_end, t_init_start, t_init_end
@@ -164,12 +166,13 @@ program rk2_mpi_cuda_driver
     call profiler_start("Initialization")
     t_init_start = omp_get_wtime()
 
-    call init_ocean_grid_mpi(G, MD, GV, nk, 10.0_dp, 45.0_dp)
+    call init_ocean_grid_mpi_cuda(G, MD, GV, nk, 10.0_dp, 45.0_dp)
 
     ! Continuity CUDA init
     call continuity_init_cuda(cont_CS, G%isd, G%ied, G%jsd, G%jed, &
                               G%isc, G%iec, G%jsc, G%jec, nk, &
-                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true.)
+                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true., &
+                              G%dxT, G%areaT, G%dxCu, G%mask2dCu)
 
     ! Coriolis CUDA init
     call coriolis_init_cuda(cor_CS, G%isd, G%ied, G%jsd, G%jed, &
@@ -178,16 +181,8 @@ program rk2_mpi_cuda_driver
                             G%dyCv, G%dxCu, G%dyCu, G%dxCv, G%IdxCu, G%IdyCv, &
                             SADOURNY75_ENERGY_CUDA)
 
-    ! Barotropic: OpenACC init for metric extraction, then CUDA init
-    call barotropic_init(bt_CS_acc, G, dt, bt_nsteps)
-    call barotropic_init_cuda(bt_CS_cuda, G%isd, G%ied, G%jsd, G%jed, &
-        G%isc, G%iec, G%jsc, G%jec, &
-        bt_nsteps, dt, bt_CS_acc%bebt, 0, &
-        bt_CS_acc%Datu, bt_CS_acc%Datv, &
-        bt_CS_acc%gtot_E, bt_CS_acc%gtot_W, bt_CS_acc%gtot_N, bt_CS_acc%gtot_S, &
-        bt_CS_acc%f_4_u, bt_CS_acc%f_4_v, bt_CS_acc%bt_rem_u, bt_CS_acc%bt_rem_v, &
-        G%IareaT, G%IdxCu, G%IdyCv)
-    call barotropic_end(bt_CS_acc)
+    ! Barotropic CUDA init (direct from grid metrics, no OpenACC)
+    call barotropic_init_cuda_from_grid(bt_CS_cuda, G, dt, bt_nsteps)
 
     ! Vertical viscosity CUDA init
     call vert_visc_init_cuda(visc_CS, G%isd, G%ied, G%jsd, G%jed, &
@@ -195,20 +190,8 @@ program rk2_mpi_cuda_driver
                              G%mask2dCu, G%mask2dCv, &
                              1.0e-4_dp, 1.0e-2_dp, 1.0e-2_dp, 50.0_dp, 10.0_dp)
 
-    ! Horizontal viscosity: OpenACC init for metric extraction, then CUDA init
-    call hor_visc_init(hvisc_CS_acc, G, GV, Kh=100.0_dp)
-    call hor_visc_init_cuda(hvisc_CS, G%isd, G%ied, G%jsd, G%jed, &
-                            G%isc, G%iec, G%jsc, G%jec, nk, &
-                            100.0_dp, hvisc_CS_acc%h_neglect, &
-                            hvisc_CS_acc%DY_dxT, hvisc_CS_acc%DX_dyT, &
-                            hvisc_CS_acc%DY_dxBu, hvisc_CS_acc%DX_dyBu, &
-                            G%IdyCu, G%IdxCu, G%IdyCv, G%IdxCv, &
-                            G%IareaCu, G%IareaCv, &
-                            G%mask2dT, G%mask2dBu, &
-                            hvisc_CS_acc%reduction_xx, hvisc_CS_acc%reduction_xy, &
-                            hvisc_CS_acc%dy2h, hvisc_CS_acc%dx2h, &
-                            hvisc_CS_acc%dy2q, hvisc_CS_acc%dx2q)
-    call hor_visc_end(hvisc_CS_acc)
+    ! Horizontal viscosity CUDA init (direct from grid metrics, no OpenACC)
+    call hor_visc_init_cuda_from_grid(hvisc_CS, G, nk, 100.0_dp)
 
     ! Allocate host arrays
     allocate(u_h(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -226,7 +209,6 @@ program rk2_mpi_cuda_driver
     allocate(v_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(h_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(h0_d(G%isd:G%ied, G%jsd:G%jed, nk))
-    allocate(htmp_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(uh_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(vh_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate(CAu_d(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -247,6 +229,13 @@ program rk2_mpi_cuda_driver
     allocate(dxCv_d(G%isd:G%ied, G%jsd:G%jed))
     dyCu_d = G%dyCu
     dxCv_d = G%dxCv
+    ! Full continuity solver device arrays
+    allocate(uhbt_cont_d(G%isd:G%ied, G%jsd:G%jed))
+    uhbt_cont_d = 0.0_dp
+    call alloc_BT_cont_type_cuda(BT_cont_cuda, G%isd, G%ied, G%jsd, G%jed, nk)
+
+    ! Initialize shared GPU workspace pool (9 3D + 6 2D slots)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 9, 6)
 
     ! Initialize host state using global coordinates
     call initialize_state_mpi(u_h, v_h, h_h, h0_h, eta_h, ubt_h, vbt_h, G, GV, MD)
@@ -259,13 +248,13 @@ program rk2_mpi_cuda_driver
     call initialize_stress_mpi(taux_d, tauy_d, G, MD)
 
     ! Initial halo exchanges
-    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h0_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h0_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
 
     t_init_end = omp_get_wtime()
     call profiler_stop("Initialization")
@@ -283,20 +272,21 @@ program rk2_mpi_cuda_driver
     call profiler_start("Warmup")
     if (MD%rank == 0) print '(A)', 'Warming up CUDA kernels...'
     call compute_transports_cuda(u_d, v_d, h_d, uh_d, vh_d, dyCu_d, dxCv_d, G, GV)
-    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
-    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
-    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, visc_CS, taux_d, tauy_d)
+    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
+    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
+    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, visc_CS, taux_d, tauy_d, ws)
     call btstep_cuda(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d, bt_CS_cuda)
-    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS)
+    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS, ws, &
+                             uhbt_cont_d, BT_cont_cuda)
 
     ! Reset after warmup
     u_d = u_h; v_d = v_h; h_d = h_h
     eta_d = eta_h; ubt_d = ubt_h; vbt_d = vbt_h
 
     ! Re-exchange halos after reset
-    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
     call profiler_stop("Warmup")
 
     !=========================================================================
@@ -329,15 +319,15 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: uh, vh
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
         ! 2. Horizontal viscosity
         call profiler_start("HorVisc")
         t_start = omp_get_wtime()
-        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
+        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
         call profiler_stop("HorVisc")
@@ -345,7 +335,7 @@ program rk2_mpi_cuda_driver
         ! 3. Coriolis
         call profiler_start("Coriolis")
         t_start = omp_get_wtime()
-        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
+        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
         call profiler_stop("Coriolis")
@@ -361,7 +351,7 @@ program rk2_mpi_cuda_driver
         ! 5. Vertical viscosity
         call profiler_start("VertVisc")
         t_start = omp_get_wtime()
-        call vert_visc_cra_cuda(up_d, vp_d, h_d, dt, visc_CS, taux_d, tauy_d)
+        call vert_visc_cra_cuda(up_d, vp_d, h_d, dt, visc_CS, taux_d, tauy_d, ws)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
@@ -387,15 +377,16 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: up, vp
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(up_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vp_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(up_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vp_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
         ! 7. Continuity
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
-        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS)
+        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS, ws, &
+                                 uhbt_cont_d, BT_cont_cuda)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -403,7 +394,7 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: h
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -418,15 +409,15 @@ program rk2_mpi_cuda_driver
 
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
         ! 9. Horizontal viscosity
         call profiler_start("HorVisc")
         t_start = omp_get_wtime()
-        call hor_visc_cuda(up_d, vp_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
+        call hor_visc_cuda(up_d, vp_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
         call profiler_stop("HorVisc")
@@ -434,7 +425,7 @@ program rk2_mpi_cuda_driver
         ! 10. Coriolis
         call profiler_start("Coriolis")
         t_start = omp_get_wtime()
-        call CorAdCalc_cuda(up_d, vp_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
+        call CorAdCalc_cuda(up_d, vp_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
         call profiler_stop("Coriolis")
@@ -450,7 +441,7 @@ program rk2_mpi_cuda_driver
         ! 12. Vertical viscosity
         call profiler_start("VertVisc")
         t_start = omp_get_wtime()
-        call vert_visc_cra_cuda(u_d, v_d, h_d, 0.5_dp*dt, visc_CS, taux_d, tauy_d)
+        call vert_visc_cra_cuda(u_d, v_d, h_d, 0.5_dp*dt, visc_CS, taux_d, tauy_d, ws)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
@@ -476,8 +467,9 @@ program rk2_mpi_cuda_driver
         ! 14. Final continuity
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
-        htmp_d = h_d
-        call continuity_PPM_cuda(u_d, htmp_d, h_d, uh_d, 0.5_dp*dt, cont_CS)
+        call workspace_copy_3d(ws%s3d(:,:,1:nk,4), h_d, G%ied-G%isd+1, G%jed-G%jsd+1, nk)
+        call continuity_PPM_cuda(u_d, ws%s3d(:,:,1:nk,4), h_d, uh_d, 0.5_dp*dt, cont_CS, ws, &
+                                 uhbt_cont_d, BT_cont_cuda)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -485,12 +477,12 @@ program rk2_mpi_cuda_driver
         ! End-of-step halo exchanges
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-        call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-        call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+        call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -542,19 +534,22 @@ program rk2_mpi_cuda_driver
     ! CLEANUP
     !=========================================================================
     call profiler_start("Finalize")
+    call workspace_end(ws)
+    call dealloc_BT_cont_type_cuda(BT_cont_cuda)
     call continuity_end_cuda(cont_CS)
     call coriolis_end_cuda(cor_CS)
     call barotropic_end_cuda(bt_CS_cuda)
     call vert_visc_end_cuda(visc_CS)
     call hor_visc_end_cuda(hvisc_CS)
-    call end_ocean_grid(G)
+    call end_ocean_grid_cuda(G)
 
     deallocate(u_h, v_h, h_h, h0_h, uh_h, vh_h)
     deallocate(eta_h, ubt_h, vbt_h)
-    deallocate(u_d, v_d, h_d, h0_d, htmp_d, uh_d, vh_d)
+    deallocate(u_d, v_d, h_d, h0_d, uh_d, vh_d)
     deallocate(CAu_d, CAv_d, up_d, vp_d, diffu_d, diffv_d)
     deallocate(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d)
     deallocate(taux_d, tauy_d, dyCu_d, dxCv_d)
+    deallocate(uhbt_cont_d)
     call profiler_stop("Finalize")
 
     call profiler_stop("Total")
@@ -796,5 +791,298 @@ contains
             print '(A)', '  CFL OK'
         end if
     end subroutine check_bt_cfl
+
+    !> Initialize CUDA hor_visc directly from grid metrics (no OpenACC)
+    subroutine hor_visc_init_cuda_from_grid(CS, G, nk, Kh)
+        type(hor_visc_CS_cuda), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        integer, intent(in) :: nk
+        real(dp), intent(in) :: Kh
+
+        real(dp), allocatable :: DY_dxT(:,:), DX_dyT(:,:)
+        real(dp), allocatable :: DY_dxBu(:,:), DX_dyBu(:,:)
+        real(dp), allocatable :: reduction_xx(:,:), reduction_xy(:,:)
+        real(dp), allocatable :: dy2h(:,:), dx2h(:,:), dy2q(:,:), dx2q(:,:)
+        real(dp) :: h_neglect
+        integer :: i, j, isd, ied, jsd, jed
+
+        isd = G%isd; ied = G%ied; jsd = G%jsd; jed = G%jed
+
+        ! Allocate temporary host arrays for metric computation
+        allocate(DY_dxT(isd:ied, jsd:jed), DX_dyT(isd:ied, jsd:jed))
+        allocate(DY_dxBu(isd:ied, jsd:jed), DX_dyBu(isd:ied, jsd:jed))
+        allocate(reduction_xx(isd:ied, jsd:jed), reduction_xy(isd:ied, jsd:jed))
+        allocate(dy2h(isd:ied, jsd:jed), dx2h(isd:ied, jsd:jed))
+        allocate(dy2q(isd:ied, jsd:jed), dx2q(isd:ied, jsd:jed))
+
+        ! Compute metrics directly from grid
+        do j = jsd, jed
+            do i = isd, ied
+                ! Metric ratios
+                DX_dyT(i,j) = G%dxT(i,j) * G%IdyT(i,j)
+                DY_dxT(i,j) = G%dyT(i,j) * G%IdxT(i,j)
+                DX_dyBu(i,j) = G%dxBu(i,j) * G%IdyBu(i,j)
+                DY_dxBu(i,j) = G%dyBu(i,j) * G%IdxBu(i,j)
+
+                ! Grid spacing squared
+                dx2h(i,j) = G%dxT(i,j) * G%dxT(i,j)
+                dy2h(i,j) = G%dyT(i,j) * G%dyT(i,j)
+                dx2q(i,j) = G%dxBu(i,j) * G%dxBu(i,j)
+                dy2q(i,j) = G%dyBu(i,j) * G%dyBu(i,j)
+
+                ! Reduction factors (1.0 for uniform grid)
+                reduction_xx(i,j) = 1.0_dp
+                reduction_xy(i,j) = 1.0_dp
+            end do
+        end do
+
+        ! h_neglect for numerical stability (same as max(Angstrom_H, 1e-3))
+        h_neglect = 1.0e-3_dp
+
+        ! Call the CUDA init with computed metrics
+        call hor_visc_init_cuda(CS, isd, ied, jsd, jed, &
+                                G%isc, G%iec, G%jsc, G%jec, nk, &
+                                Kh, h_neglect, &
+                                DY_dxT, DX_dyT, DY_dxBu, DX_dyBu, &
+                                G%IdyCu, G%IdxCu, G%IdyCv, G%IdxCv, &
+                                G%IareaCu, G%IareaCv, &
+                                G%mask2dT, G%mask2dBu, &
+                                reduction_xx, reduction_xy, &
+                                dy2h, dx2h, dy2q, dx2q)
+
+        ! Free temporary host arrays
+        deallocate(DY_dxT, DX_dyT, DY_dxBu, DX_dyBu)
+        deallocate(reduction_xx, reduction_xy)
+        deallocate(dy2h, dx2h, dy2q, dx2q)
+
+    end subroutine hor_visc_init_cuda_from_grid
+
+    !> Initialize CUDA barotropic directly from grid metrics (no OpenACC)
+    subroutine barotropic_init_cuda_from_grid(CS, G, dt, nstep)
+        type(barotropic_CS_cuda), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        real(dp), intent(in) :: dt
+        integer, intent(in) :: nstep
+
+        real(dp), allocatable :: Datu(:,:), Datv(:,:)
+        real(dp), allocatable :: gtot_E(:,:), gtot_W(:,:), gtot_N(:,:), gtot_S(:,:)
+        real(dp), allocatable :: f_4_u(:,:,:), f_4_v(:,:,:)
+        real(dp), allocatable :: bt_rem_u(:,:), bt_rem_v(:,:)
+        real(dp) :: depth, bebt, f0
+        integer :: i, j, isd, ied, jsd, jed
+
+        isd = G%isd; ied = G%ied; jsd = G%jsd; jed = G%jed
+        depth = 4000.0_dp
+        bebt = 0.2_dp
+
+        ! Allocate temporary host arrays
+        allocate(Datu(isd:ied, jsd:jed), Datv(isd:ied, jsd:jed))
+        allocate(gtot_E(isd:ied, jsd:jed), gtot_W(isd:ied, jsd:jed))
+        allocate(gtot_N(isd:ied, jsd:jed), gtot_S(isd:ied, jsd:jed))
+        allocate(f_4_u(4, isd:ied, jsd:jed), f_4_v(4, isd:ied, jsd:jed))
+        allocate(bt_rem_u(isd:ied, jsd:jed), bt_rem_v(isd:ied, jsd:jed))
+
+        ! Compute metrics directly from grid
+        do j = jsd, jed
+            do i = isd, ied
+                Datu(i,j) = depth * G%dyCu(i,j)
+                Datv(i,j) = depth * G%dxCv(i,j)
+                gtot_E(i,j) = G_EARTH
+                gtot_W(i,j) = G_EARTH
+                gtot_N(i,j) = G_EARTH
+                gtot_S(i,j) = G_EARTH
+                bt_rem_u(i,j) = 0.999_dp
+                bt_rem_v(i,j) = 0.999_dp
+
+                ! Coriolis coefficients (f/4 at each corner)
+                f0 = G%CoriolisBu(i,j)
+                f_4_u(1,i,j) = 0.25_dp * f0
+                f_4_u(2,i,j) = 0.25_dp * f0
+                f_4_u(3,i,j) = 0.25_dp * f0
+                f_4_u(4,i,j) = 0.25_dp * f0
+                f_4_v(1,i,j) = 0.25_dp * f0
+                f_4_v(2,i,j) = 0.25_dp * f0
+                f_4_v(3,i,j) = 0.25_dp * f0
+                f_4_v(4,i,j) = 0.25_dp * f0
+            end do
+        end do
+
+        ! Call the CUDA init with computed metrics
+        call barotropic_init_cuda(CS, isd, ied, jsd, jed, &
+                                  G%isc, G%iec, G%jsc, G%jec, &
+                                  nstep, dt, bebt, 0, &
+                                  Datu, Datv, &
+                                  gtot_E, gtot_W, gtot_N, gtot_S, &
+                                  f_4_u, f_4_v, bt_rem_u, bt_rem_v, &
+                                  G%IareaT, G%IdxCu, G%IdyCv)
+
+        ! Free temporary host arrays
+        deallocate(Datu, Datv)
+        deallocate(gtot_E, gtot_W, gtot_N, gtot_S)
+        deallocate(f_4_u, f_4_v, bt_rem_u, bt_rem_v)
+
+    end subroutine barotropic_init_cuda_from_grid
+
+    !> Initialize ocean grid for MPI CUDA driver (no OpenACC directives)
+    subroutine init_ocean_grid_mpi_cuda(G, MD, GV, nk, dx_km, lat_deg)
+        type(ocean_grid_type), intent(inout) :: G
+        type(mpi_domain_type), intent(in) :: MD
+        type(verticalGrid_type), intent(inout) :: GV
+        integer, intent(in) :: nk
+        real(dp), intent(in) :: dx_km
+        real(dp), intent(in) :: lat_deg
+
+        real(dp) :: dx_m, f0, beta
+        integer :: i, j, j_global, halo
+
+        halo = MD%halo
+
+        ! Store local compute dimensions
+        G%ni = MD%ni_local
+        G%nj = MD%nj_local
+        G%nk = nk
+
+        ! Data domain: 1 to ni_local + 2*halo
+        G%isd = 1
+        G%ied = MD%ni_local + 2 * halo
+        G%jsd = 1
+        G%jed = MD%nj_local + 2 * halo
+
+        ! Compute domain: halo+1 to ni_local+halo
+        G%isc = halo + 1
+        G%iec = MD%ni_local + halo
+        G%jsc = halo + 1
+        G%jec = MD%nj_local + halo
+
+        ! Store MPI offsets
+        G%i_offset = MD%i_offset
+        G%j_offset = MD%j_offset
+
+        ! Grid spacing
+        dx_m = dx_km * 1000.0_dp
+        G%dx = dx_m
+        G%dy = dx_m
+
+        ! Vertical grid (no OpenACC)
+        GV%ke = nk
+        GV%Angstrom_H = 1.0e-10_dp
+
+        ! Allocate arrays (local size with halos)
+        allocate(G%IareaT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%areaT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dy_Cu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%areaBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%CoriolisBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%bathyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dCv(G%isd:G%ied, G%jsd:G%jed))
+
+        ! Beta-plane Coriolis parameters
+        f0 = 2.0_dp * OMEGA * sin(lat_deg * PI / 180.0_dp)
+        beta = 2.0_dp * OMEGA * cos(lat_deg * PI / 180.0_dp) / EARTH_RADIUS
+
+        ! Initialize grid metrics (uniform except Coriolis)
+        do j = G%jsd, G%jed
+            j_global = (j - halo) + MD%j_offset
+
+            do i = G%isd, G%ied
+                G%areaT(i, j) = dx_m * dx_m
+                G%IareaT(i, j) = 1.0_dp / (dx_m * dx_m)
+                G%dxT(i, j) = dx_m
+                G%dyT(i, j) = dx_m
+                G%IdxT(i, j) = 1.0_dp / dx_m
+                G%IdyT(i, j) = 1.0_dp / dx_m
+                G%dxCu(i, j) = dx_m
+                G%dyCu(i, j) = dx_m
+                G%dy_Cu(i, j) = dx_m
+                G%IdxCu(i, j) = 1.0_dp / dx_m
+                G%IdyCu(i, j) = 1.0_dp / dx_m
+                G%dxCv(i, j) = dx_m
+                G%dyCv(i, j) = dx_m
+                G%IdxCv(i, j) = 1.0_dp / dx_m
+                G%IdyCv(i, j) = 1.0_dp / dx_m
+                G%areaBu(i, j) = dx_m * dx_m
+                G%IareaBu(i, j) = 1.0_dp / (dx_m * dx_m)
+                G%IareaCu(i, j) = 1.0_dp / (dx_m * dx_m)
+                G%IareaCv(i, j) = 1.0_dp / (dx_m * dx_m)
+                G%dxBu(i, j) = dx_m
+                G%dyBu(i, j) = dx_m
+                G%IdxBu(i, j) = 1.0_dp / dx_m
+                G%IdyBu(i, j) = 1.0_dp / dx_m
+                G%mask2dT(i, j) = 1.0_dp
+                G%mask2dBu(i, j) = 1.0_dp
+                G%mask2dCu(i, j) = 1.0_dp
+                G%mask2dCv(i, j) = 1.0_dp
+                G%bathyT(i, j) = 4000.0_dp
+                G%CoriolisBu(i, j) = f0 + beta * (real(j_global - MD%nj_global/2, dp) - 0.5_dp) * dx_m
+            end do
+        end do
+
+        G%first_direction = 0
+        G%nbytes = 29_int64 * int(G%ied - G%isd + 1, int64) * &
+                   int(G%jed - G%jsd + 1, int64) * 8_int64
+
+        ! NO OpenACC data transfers - grid stays on host only
+        ! CUDA kernels will access grid data via explicit copies in their init routines
+
+    end subroutine init_ocean_grid_mpi_cuda
+
+    !> Deallocate ocean grid without OpenACC (for MPI CUDA driver)
+    subroutine end_ocean_grid_cuda(G)
+        type(ocean_grid_type), intent(inout) :: G
+
+        ! NO OpenACC exit data - grid was never on OpenACC device
+        if (allocated(G%IareaT)) deallocate(G%IareaT)
+        if (allocated(G%areaT)) deallocate(G%areaT)
+        if (allocated(G%dxT)) deallocate(G%dxT)
+        if (allocated(G%dyT)) deallocate(G%dyT)
+        if (allocated(G%IdxT)) deallocate(G%IdxT)
+        if (allocated(G%IdyT)) deallocate(G%IdyT)
+        if (allocated(G%dxCu)) deallocate(G%dxCu)
+        if (allocated(G%dyCu)) deallocate(G%dyCu)
+        if (allocated(G%dy_Cu)) deallocate(G%dy_Cu)
+        if (allocated(G%IdxCu)) deallocate(G%IdxCu)
+        if (allocated(G%IdyCu)) deallocate(G%IdyCu)
+        if (allocated(G%dxCv)) deallocate(G%dxCv)
+        if (allocated(G%dyCv)) deallocate(G%dyCv)
+        if (allocated(G%IdxCv)) deallocate(G%IdxCv)
+        if (allocated(G%IdyCv)) deallocate(G%IdyCv)
+        if (allocated(G%IareaBu)) deallocate(G%IareaBu)
+        if (allocated(G%areaBu)) deallocate(G%areaBu)
+        if (allocated(G%CoriolisBu)) deallocate(G%CoriolisBu)
+        if (allocated(G%IareaCu)) deallocate(G%IareaCu)
+        if (allocated(G%IareaCv)) deallocate(G%IareaCv)
+        if (allocated(G%dxBu)) deallocate(G%dxBu)
+        if (allocated(G%dyBu)) deallocate(G%dyBu)
+        if (allocated(G%IdxBu)) deallocate(G%IdxBu)
+        if (allocated(G%IdyBu)) deallocate(G%IdyBu)
+        if (allocated(G%bathyT)) deallocate(G%bathyT)
+        if (allocated(G%mask2dT)) deallocate(G%mask2dT)
+        if (allocated(G%mask2dBu)) deallocate(G%mask2dBu)
+        if (allocated(G%mask2dCu)) deallocate(G%mask2dCu)
+        if (allocated(G%mask2dCv)) deallocate(G%mask2dCv)
+
+    end subroutine end_ocean_grid_cuda
 
 end program rk2_mpi_cuda_driver

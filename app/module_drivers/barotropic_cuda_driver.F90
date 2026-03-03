@@ -7,7 +7,7 @@ program barotropic_cuda_driver
     use cudafor
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
-    use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid
+    use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid, PI
     use mom6_barotropic, only: barotropic_CS, barotropic_init, barotropic_end
     use mom6_barotropic_cuda, only: barotropic_CS_cuda, barotropic_init_cuda, &
                                      btstep_cuda, barotropic_end_cuda
@@ -104,11 +104,11 @@ program barotropic_cuda_driver
     ! ----------------------------------------------------------------
     do j = G%jsd, G%jed
         do i = G%isd, G%ied
-            eta_in(i, j) = 0.5_dp * sin(real(i - 1, dp) / real(ni, dp) * 3.14159_dp * 2.0_dp) * &
-                           cos(real(j - 1, dp) / real(nj, dp) * 3.14159_dp * 2.0_dp)
+            eta_in(i, j) = 0.5_dp * sin(real(i - 1, dp) / real(ni, dp) * PI * 2.0_dp) * &
+                           cos(real(j - 1, dp) / real(nj, dp) * PI * 2.0_dp)
             eta_init(i, j) = eta_in(i, j)
-            ubt_in(i, j) = 0.05_dp * sin(real(j - 1, dp) / real(nj, dp) * 3.14159_dp)
-            vbt_in(i, j) = 0.05_dp * cos(real(i - 1, dp) / real(ni, dp) * 3.14159_dp)
+            ubt_in(i, j) = 0.05_dp * sin(real(j - 1, dp) / real(nj, dp) * PI)
+            vbt_in(i, j) = 0.05_dp * cos(real(i - 1, dp) / real(ni, dp) * PI)
         end do
     end do
 

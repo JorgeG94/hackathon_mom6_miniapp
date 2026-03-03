@@ -9,7 +9,7 @@ module mom6_types
     private
 
     public :: ocean_grid_type, verticalGrid_type
-    public :: G_EARTH, RHO_0, OMEGA
+    public :: G_EARTH, RHO_0, OMEGA, HALO_WIDTH, PI, EARTH_RADIUS
     public :: init_ocean_grid, end_ocean_grid, init_verticalGrid
     public :: BT_cont_type, alloc_BT_cont_type, dealloc_BT_cont_type
     public :: mech_forcing_type, init_mech_forcing, end_mech_forcing
@@ -80,6 +80,9 @@ module mom6_types
     real(dp), parameter :: G_EARTH = 9.80_dp    ! Gravitational acceleration [m s-2]
     real(dp), parameter :: RHO_0 = 1035.0_dp    ! Reference density [kg m-3]
     real(dp), parameter :: OMEGA = 7.2921e-5_dp  ! Earth rotation rate [s-1]
+    real(dp), parameter :: PI = 3.14159265358979323846_dp  ! Pi
+    real(dp), parameter :: EARTH_RADIUS = 6.371e6_dp! Earth radius [m]
+    integer, parameter :: HALO_WIDTH = 7          ! Deep halo width matching MOM6
 
     !> Container for information about the summed layer transports
    !! and how they will vary as the barotropic velocity is changed.
@@ -183,8 +186,8 @@ contains
         ! Initialize uniform grid metrics
 
         ! Beta-plane Coriolis: f = f0 + beta*y
-        f0 = 2.0_dp*OMEGA*sin(lat_deg*3.14159265358979_dp/180.0_dp)
-        beta = 2.0_dp*OMEGA*cos(lat_deg*3.14159265358979_dp/180.0_dp)/6.371e6_dp
+        f0 = 2.0_dp*OMEGA*sin(lat_deg*PI/180.0_dp)
+        beta = 2.0_dp*OMEGA*cos(lat_deg*PI/180.0_dp)/EARTH_RADIUS
 
         ! Initialize grid metrics
         do j = G%jsd, G%jed

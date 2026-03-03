@@ -21,7 +21,7 @@
 !!
 module mom6_hor_visc_omp
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type
+    use mom6_types, only: ocean_grid_type, verticalGrid_type, PI
     implicit none
     private
 
@@ -48,6 +48,7 @@ module mom6_hor_visc_omp
         logical :: better_bound_Ah = .false. ! Use thickness-aware Ah bounding
         logical :: use_land_mask = .true.   ! Use land mask for thickness interpolation
         logical :: modified_Leith = .false. ! Include divergence gradient in Leith
+        logical :: use_fused_kernels = .false. ! Use memory-efficient fused kernels (Laplacian-only)
 
         !----- Scalar parameters -----
         real(dp) :: Kh_bg_min = 0.0_dp      ! Minimum background Kh [L2 T-1]
@@ -155,8 +156,8 @@ module mom6_hor_visc_omp
         integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type hor_visc_CS
 
-    real(dp), parameter :: inv_PI3 = 1.0_dp/(3.14159265358979_dp**3)
-    real(dp), parameter :: inv_PI6 = 1.0_dp/(3.14159265358979_dp**6)
+    real(dp), parameter :: inv_PI3 = 1.0_dp/(PI**3)
+    real(dp), parameter :: inv_PI6 = 1.0_dp/(PI**6)
 
 contains
 
@@ -207,6 +208,17 @@ contains
         CS%h_neglect = max(GV%Angstrom_H, 1.0e-3_dp)
         CS%nk = GV%ke
 
+        ! Determine if we can use memory-efficient fused kernels
+        ! Fused mode: Laplacian-only, no biharmonic/Smagorinsky/Leith/better_bound
+        CS%use_fused_kernels = CS%Laplacian .and. &
+                               .not. CS%biharmonic .and. &
+                               .not. CS%Smagorinsky_Kh .and. &
+                               .not. CS%Smagorinsky_Ah .and. &
+                               .not. CS%Leith_Kh .and. &
+                               .not. CS%Leith_Ah .and. &
+                               .not. CS%better_bound_Kh .and. &
+                               .not. CS%better_bound_Ah
+
         ! Allocate all arrays
         call allocate_hor_visc_arrays(CS, G, GV%ke)
 
@@ -226,89 +238,123 @@ contains
             CS%DX_dyBu(i, j) = G%dxBu(i, j)*G%IdyBu(i, j)
             CS%DY_dxBu(i, j) = G%dyBu(i, j)*G%IdxBu(i, j)
 
-            ! Biharmonic metrics
-            CS%Idx2dyCu(i, j) = G%IdxCu(i, j)*G%IdxCu(i, j)*G%IdyCu(i, j)
-            CS%Idxdy2u(i, j) = G%IdxCu(i, j)*G%IdyCu(i, j)*G%IdyCu(i, j)
-            CS%Idx2dyCv(i, j) = G%IdxCv(i, j)*G%IdxCv(i, j)*G%IdyCv(i, j)
-            CS%Idxdy2v(i, j) = G%IdxCv(i, j)*G%IdyCv(i, j)*G%IdyCv(i, j)
-
             ! Reduction factors (1.0 for now, could be used for partial cells)
             CS%reduction_xx(i, j) = 1.0_dp
             CS%reduction_xy(i, j) = 1.0_dp
 
-            ! Grid spacing for Smagorinsky/Leith constants
-            grid_sp_h2 = G%areaT(i, j)  ! dx*dy ~ dx^2
-            grid_sp_h3 = sqrt(grid_sp_h2)*grid_sp_h2  ! ~ dx^3
-            grid_sp_h4 = grid_sp_h2*grid_sp_h2  ! ~ dx^4
-
             ! Background viscosities (spatially uniform for now)
             CS%Kh_bg_xx(i, j) = Kh_val
             CS%Kh_bg_xy(i, j) = Kh_val
-            CS%Ah_bg_xx(i, j) = Ah_val
-            CS%Ah_bg_xy(i, j) = Ah_val
+
+            ! Grid spacing for constants
+            grid_sp_h2 = G%areaT(i, j)  ! dx*dy ~ dx^2
 
             ! Maximum viscosity for stability (CFL-based)
-            ! Kh_max ~ dx^2 / (4*dt), but we use a fixed fraction of grid spacing
-            CS%Kh_Max_xx(i, j) = 0.25_dp*grid_sp_h2/1.0_dp  ! Assumes dt=1s for max bound
+            CS%Kh_Max_xx(i, j) = 0.25_dp*grid_sp_h2/1.0_dp
             CS%Kh_Max_xy(i, j) = 0.25_dp*grid_sp_h2/1.0_dp
-            CS%Ah_Max_xx(i, j) = 0.0625_dp*grid_sp_h4/1.0_dp
-            CS%Ah_Max_xy(i, j) = 0.0625_dp*grid_sp_h4/1.0_dp
 
-            ! Smagorinsky constants: C_smag^2 * dx^2 for Laplacian
-            CS%Laplac2_const_xx(i, j) = CS%Smag_Lap_const*CS%Smag_Lap_const*grid_sp_h2
-            CS%Laplac2_const_xy(i, j) = CS%Smag_Lap_const*CS%Smag_Lap_const*grid_sp_h2
+            if (CS%biharmonic) then
+                grid_sp_h4 = grid_sp_h2*grid_sp_h2
+                CS%Ah_bg_xx(i, j) = Ah_val
+                CS%Ah_bg_xy(i, j) = Ah_val
+                CS%Ah_Max_xx(i, j) = 0.0625_dp*grid_sp_h4/1.0_dp
+                CS%Ah_Max_xy(i, j) = 0.0625_dp*grid_sp_h4/1.0_dp
+                CS%Idx2dyCu(i, j) = G%IdxCu(i, j)*G%IdxCu(i, j)*G%IdyCu(i, j)
+                CS%Idxdy2u(i, j) = G%IdxCu(i, j)*G%IdyCu(i, j)*G%IdyCu(i, j)
+                CS%Idx2dyCv(i, j) = G%IdxCv(i, j)*G%IdxCv(i, j)*G%IdyCv(i, j)
+                CS%Idxdy2v(i, j) = G%IdxCv(i, j)*G%IdyCv(i, j)*G%IdyCv(i, j)
+                CS%Biharm_const_xx(i, j) = CS%Smag_bi_const*CS%Smag_bi_const*grid_sp_h4
+                CS%Biharm_const_xy(i, j) = CS%Smag_bi_const*CS%Smag_bi_const*grid_sp_h4
+            end if
 
-            ! Biharmonic Smagorinsky: C_smag^2 * dx^4
-            CS%Biharm_const_xx(i, j) = CS%Smag_bi_const*CS%Smag_bi_const*grid_sp_h4
-            CS%Biharm_const_xy(i, j) = CS%Smag_bi_const*CS%Smag_bi_const*grid_sp_h4
+            if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
+                CS%Laplac2_const_xx(i, j) = CS%Smag_Lap_const*CS%Smag_Lap_const*grid_sp_h2
+                CS%Laplac2_const_xy(i, j) = CS%Smag_Lap_const*CS%Smag_Lap_const*grid_sp_h2
+            end if
 
-            ! Leith constants: C_leith * dx^3
-            CS%Laplac3_const_xx(i, j) = CS%Leith_const*grid_sp_h3
-            CS%Laplac3_const_xy(i, j) = CS%Leith_const*grid_sp_h3
-
-            ! Leith biharmonic constants: C_leith * dx^6
-            CS%Biharm6_const_xx(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
-            CS%Biharm6_const_xy(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
+            if (CS%Leith_Kh .or. CS%Leith_Ah) then
+                grid_sp_h3 = sqrt(grid_sp_h2)*grid_sp_h2
+                CS%Laplac3_const_xx(i, j) = CS%Leith_const*grid_sp_h3
+                CS%Laplac3_const_xy(i, j) = CS%Leith_const*grid_sp_h3
+                CS%Biharm6_const_xx(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
+                CS%Biharm6_const_xy(i, j) = CS%Leith_const*grid_sp_h3*grid_sp_h3
+            end if
             end do
         end do
 
-        ! Initialize work arrays to zero
-        CS%dudx = 0.0_dp; CS%dvdy = 0.0_dp; CS%dvdx = 0.0_dp; CS%dudy = 0.0_dp
-        CS%sh_xx = 0.0_dp; CS%sh_xy = 0.0_dp
+        ! Initialize work arrays to zero (only those that are allocated)
         CS%str_xx = 0.0_dp; CS%str_xy = 0.0_dp
-        CS%h_u = 0.0_dp; CS%h_v = 0.0_dp; CS%hq = 0.0_dp
-        CS%Kh = 0.0_dp; CS%Ah = 0.0_dp; CS%Shear_mag = 0.0_dp
-        CS%Del2u = 0.0_dp; CS%Del2v = 0.0_dp
-        CS%hrat_min = 1.0_dp; CS%visc_bound_rem = 1.0_dp
-        CS%vort_xy = 0.0_dp; CS%vort_xy_dx = 0.0_dp; CS%vort_xy_dy = 0.0_dp
-        CS%grad_vort_mag_h = 0.0_dp; CS%grad_vort_mag_q = 0.0_dp; CS%vert_vort_mag = 0.0_dp
-        CS%div_xx = 0.0_dp; CS%div_xx_dx = 0.0_dp; CS%div_xx_dy = 0.0_dp
-        CS%grad_div_mag_h = 0.0_dp; CS%grad_div_mag_q = 0.0_dp
-        CS%bhstr_xx = 0.0_dp; CS%bhstr_xy = 0.0_dp; CS%Del2vort_q = 0.0_dp
 
+        if (.not. CS%use_fused_kernels) then
+            CS%dudx = 0.0_dp; CS%dvdy = 0.0_dp; CS%dvdx = 0.0_dp; CS%dudy = 0.0_dp
+            CS%sh_xx = 0.0_dp; CS%sh_xy = 0.0_dp
+            CS%h_u = 0.0_dp; CS%h_v = 0.0_dp; CS%hq = 0.0_dp
+            CS%Kh = 0.0_dp
+        end if
+
+        if (CS%biharmonic) then
+            CS%Ah = 0.0_dp; CS%Del2u = 0.0_dp; CS%Del2v = 0.0_dp
+            CS%bhstr_xx = 0.0_dp; CS%bhstr_xy = 0.0_dp
+        end if
+        if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
+            CS%Shear_mag = 0.0_dp
+        end if
+        if (CS%Leith_Kh .or. CS%Leith_Ah) then
+            CS%vort_xy = 0.0_dp; CS%vort_xy_dx = 0.0_dp; CS%vort_xy_dy = 0.0_dp
+            CS%grad_vort_mag_h = 0.0_dp; CS%grad_vort_mag_q = 0.0_dp
+            CS%vert_vort_mag = 0.0_dp; CS%Del2vort_q = 0.0_dp
+        end if
+        if (CS%modified_Leith) then
+            CS%div_xx = 0.0_dp; CS%div_xx_dx = 0.0_dp; CS%div_xx_dy = 0.0_dp
+            CS%grad_div_mag_h = 0.0_dp; CS%grad_div_mag_q = 0.0_dp
+        end if
+        if (CS%better_bound_Kh .or. CS%better_bound_Ah) then
+            CS%hrat_min = 1.0_dp; CS%visc_bound_rem = 1.0_dp
+        end if
+
+        ! --- GPU data transfers ---
         !$omp target enter data map(to: CS)
-        !$omp target enter data map(to: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
-        !$omp target enter data map(to: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
-        !$omp target enter data map(to: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
-        !$omp target enter data map(to: CS%Biharm_const_xx, CS%Biharm_const_xy)
-        !$omp target enter data map(to: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
-        !$omp target enter data map(to: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+        !$omp target enter data map(to: CS%Kh_bg_xx, CS%Kh_bg_xy)
+        !$omp target enter data map(to: CS%Kh_Max_xx, CS%Kh_Max_xy)
         !$omp target enter data map(to: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target enter data map(to: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
-        !$omp target enter data map(to: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
         !$omp target enter data map(to: CS%reduction_xx, CS%reduction_xy)
-        !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target enter data map(alloc: CS%bhstr_xx, CS%bhstr_xy)
-        !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
-        !$omp target enter data map(alloc: CS%Kh, CS%Ah, CS%Shear_mag)
-        !$omp target enter data map(alloc: CS%Del2u, CS%Del2v)
-        !$omp target enter data map(alloc: CS%hrat_min, CS%visc_bound_rem)
-        !$omp target enter data map(alloc: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
-        !$omp target enter data map(alloc: CS%grad_vort_mag_h, CS%grad_vort_mag_q)
-        !$omp target enter data map(alloc: CS%vert_vort_mag, CS%Del2vort_q)
-        !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
-        !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
+        !$omp target enter data map(alloc: CS%str_xx, CS%str_xy)
+
+        if (.not. CS%use_fused_kernels) then
+            ! Full mode: transfer all intermediate work arrays
+            !$omp target enter data map(alloc: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+            !$omp target enter data map(alloc: CS%sh_xx, CS%sh_xy)
+            !$omp target enter data map(alloc: CS%h_u, CS%h_v, CS%hq)
+            !$omp target enter data map(alloc: CS%Kh)
+        end if
+
+        if (CS%biharmonic) then
+            !$omp target enter data map(to: CS%Ah_bg_xx, CS%Ah_bg_xy)
+            !$omp target enter data map(to: CS%Ah_Max_xx, CS%Ah_Max_xy)
+            !$omp target enter data map(to: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
+            !$omp target enter data map(to: CS%Biharm_const_xx, CS%Biharm_const_xy)
+            !$omp target enter data map(alloc: CS%bhstr_xx, CS%bhstr_xy)
+            !$omp target enter data map(alloc: CS%Ah, CS%Del2u, CS%Del2v)
+        end if
+        if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
+            !$omp target enter data map(to: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
+            !$omp target enter data map(alloc: CS%Shear_mag)
+        end if
+        if (CS%Leith_Kh .or. CS%Leith_Ah) then
+            !$omp target enter data map(to: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+            !$omp target enter data map(to: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+            !$omp target enter data map(alloc: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
+            !$omp target enter data map(alloc: CS%grad_vort_mag_h, CS%grad_vort_mag_q)
+            !$omp target enter data map(alloc: CS%vert_vort_mag, CS%Del2vort_q)
+        end if
+        if (CS%modified_Leith) then
+            !$omp target enter data map(alloc: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
+            !$omp target enter data map(alloc: CS%grad_div_mag_h, CS%grad_div_mag_q)
+        end if
+        if (CS%better_bound_Kh .or. CS%better_bound_Ah) then
+            !$omp target enter data map(alloc: CS%hrat_min, CS%visc_bound_rem)
+        end if
 
         CS%initialized = .true.
 
@@ -320,32 +366,14 @@ contains
         type(ocean_grid_type), intent(in) :: G
         integer, intent(in) :: nk
 
-        integer :: isd, ied, jsd, jed
+        integer :: isd, ied, jsd, jed, n2d, n3d
         isd = G%isd; ied = G%ied; jsd = G%jsd; jed = G%jed
 
-        ! Background viscosity arrays
+        ! Always-needed: background Kh, max Kh, metrics, reduction factors
         allocate (CS%Kh_bg_xx(isd:ied, jsd:jed))
         allocate (CS%Kh_bg_xy(isd:ied, jsd:jed))
-        allocate (CS%Ah_bg_xx(isd:ied, jsd:jed))
-        allocate (CS%Ah_bg_xy(isd:ied, jsd:jed))
-
-        ! Maximum viscosity arrays
         allocate (CS%Kh_Max_xx(isd:ied, jsd:jed))
         allocate (CS%Kh_Max_xy(isd:ied, jsd:jed))
-        allocate (CS%Ah_Max_xx(isd:ied, jsd:jed))
-        allocate (CS%Ah_Max_xy(isd:ied, jsd:jed))
-
-        ! Smagorinsky/Leith constants
-        allocate (CS%Laplac2_const_xx(isd:ied, jsd:jed))
-        allocate (CS%Laplac2_const_xy(isd:ied, jsd:jed))
-        allocate (CS%Biharm_const_xx(isd:ied, jsd:jed))
-        allocate (CS%Biharm_const_xy(isd:ied, jsd:jed))
-        allocate (CS%Laplac3_const_xx(isd:ied, jsd:jed))
-        allocate (CS%Laplac3_const_xy(isd:ied, jsd:jed))
-        allocate (CS%Biharm6_const_xx(isd:ied, jsd:jed))
-        allocate (CS%Biharm6_const_xy(isd:ied, jsd:jed))
-
-        ! Metric arrays
         allocate (CS%dx2h(isd:ied, jsd:jed))
         allocate (CS%dy2h(isd:ied, jsd:jed))
         allocate (CS%dx2q(isd:ied, jsd:jed))
@@ -354,64 +382,96 @@ contains
         allocate (CS%DY_dxT(isd:ied, jsd:jed))
         allocate (CS%DX_dyBu(isd:ied, jsd:jed))
         allocate (CS%DY_dxBu(isd:ied, jsd:jed))
-
-        ! Biharmonic metric arrays
-        allocate (CS%Idx2dyCu(isd:ied, jsd:jed))
-        allocate (CS%Idxdy2u(isd:ied, jsd:jed))
-        allocate (CS%Idx2dyCv(isd:ied, jsd:jed))
-        allocate (CS%Idxdy2v(isd:ied, jsd:jed))
-
-        ! Reduction factors
         allocate (CS%reduction_xx(isd:ied, jsd:jed))
         allocate (CS%reduction_xy(isd:ied, jsd:jed))
 
-        ! Work arrays (3D for k-parallelism)
-        allocate (CS%dudx(isd:ied, jsd:jed, nk))
-        allocate (CS%dvdy(isd:ied, jsd:jed, nk))
-        allocate (CS%dvdx(isd:ied, jsd:jed, nk))
-        allocate (CS%dudy(isd:ied, jsd:jed, nk))
-        allocate (CS%sh_xx(isd:ied, jsd:jed, nk))
-        allocate (CS%sh_xy(isd:ied, jsd:jed, nk))
+        ! Stress tensors are always needed (for divergence computation)
         allocate (CS%str_xx(isd:ied, jsd:jed, nk))
         allocate (CS%str_xy(isd:ied, jsd:jed, nk))
-        allocate (CS%bhstr_xx(isd:ied, jsd:jed, nk))
-        allocate (CS%bhstr_xy(isd:ied, jsd:jed, nk))
-        allocate (CS%h_u(isd:ied, jsd:jed, nk))
-        allocate (CS%h_v(isd:ied, jsd:jed, nk))
-        allocate (CS%hq(isd:ied, jsd:jed, nk))
 
-        ! Dynamic viscosity arrays
-        allocate (CS%Kh(isd:ied, jsd:jed, nk))
-        allocate (CS%Ah(isd:ied, jsd:jed, nk))
-        allocate (CS%Shear_mag(isd:ied, jsd:jed, nk))
+        if (CS%use_fused_kernels) then
+            ! Fused mode: only str_xx/str_xy needed on GPU
+            ! Intermediate values computed as private scalars in fused kernels
+            n2d = 14; n3d = 2
+        else
+            ! Full mode: allocate all work arrays for multi-kernel approach
+            allocate (CS%dudx(isd:ied, jsd:jed, nk))
+            allocate (CS%dvdy(isd:ied, jsd:jed, nk))
+            allocate (CS%dvdx(isd:ied, jsd:jed, nk))
+            allocate (CS%dudy(isd:ied, jsd:jed, nk))
+            allocate (CS%sh_xx(isd:ied, jsd:jed, nk))
+            allocate (CS%sh_xy(isd:ied, jsd:jed, nk))
+            allocate (CS%h_u(isd:ied, jsd:jed, nk))
+            allocate (CS%h_v(isd:ied, jsd:jed, nk))
+            allocate (CS%hq(isd:ied, jsd:jed, nk))
+            allocate (CS%Kh(isd:ied, jsd:jed, nk))
+            n2d = 14; n3d = 12
+        end if
 
         ! Biharmonic arrays
-        allocate (CS%Del2u(isd:ied, jsd:jed, nk))
-        allocate (CS%Del2v(isd:ied, jsd:jed, nk))
+        if (CS%biharmonic) then
+            allocate (CS%Ah_bg_xx(isd:ied, jsd:jed))
+            allocate (CS%Ah_bg_xy(isd:ied, jsd:jed))
+            allocate (CS%Ah_Max_xx(isd:ied, jsd:jed))
+            allocate (CS%Ah_Max_xy(isd:ied, jsd:jed))
+            allocate (CS%Idx2dyCu(isd:ied, jsd:jed))
+            allocate (CS%Idxdy2u(isd:ied, jsd:jed))
+            allocate (CS%Idx2dyCv(isd:ied, jsd:jed))
+            allocate (CS%Idxdy2v(isd:ied, jsd:jed))
+            allocate (CS%Biharm_const_xx(isd:ied, jsd:jed))
+            allocate (CS%Biharm_const_xy(isd:ied, jsd:jed))
+            allocate (CS%bhstr_xx(isd:ied, jsd:jed, nk))
+            allocate (CS%bhstr_xy(isd:ied, jsd:jed, nk))
+            allocate (CS%Ah(isd:ied, jsd:jed, nk))
+            allocate (CS%Del2u(isd:ied, jsd:jed, nk))
+            allocate (CS%Del2v(isd:ied, jsd:jed, nk))
+            n2d = n2d + 10; n3d = n3d + 5
+        end if
 
-        ! Stability bounding arrays
-        allocate (CS%hrat_min(isd:ied, jsd:jed, nk))
-        allocate (CS%visc_bound_rem(isd:ied, jsd:jed, nk))
+        ! Smagorinsky arrays
+        if (CS%Smagorinsky_Kh .or. CS%Smagorinsky_Ah) then
+            allocate (CS%Laplac2_const_xx(isd:ied, jsd:jed))
+            allocate (CS%Laplac2_const_xy(isd:ied, jsd:jed))
+            allocate (CS%Shear_mag(isd:ied, jsd:jed, nk))
+            n2d = n2d + 2; n3d = n3d + 1
+        end if
 
         ! Leith arrays
-        allocate (CS%vort_xy(isd:ied, jsd:jed, nk))
-        allocate (CS%vort_xy_dx(isd:ied, jsd:jed, nk))
-        allocate (CS%vort_xy_dy(isd:ied, jsd:jed, nk))
-        allocate (CS%grad_vort_mag_h(isd:ied, jsd:jed, nk))
-        allocate (CS%grad_vort_mag_q(isd:ied, jsd:jed, nk))
-        allocate (CS%vert_vort_mag(isd:ied, jsd:jed, nk))
-        allocate (CS%Del2vort_q(isd:ied, jsd:jed, nk))
+        if (CS%Leith_Kh .or. CS%Leith_Ah) then
+            allocate (CS%Laplac3_const_xx(isd:ied, jsd:jed))
+            allocate (CS%Laplac3_const_xy(isd:ied, jsd:jed))
+            allocate (CS%Biharm6_const_xx(isd:ied, jsd:jed))
+            allocate (CS%Biharm6_const_xy(isd:ied, jsd:jed))
+            allocate (CS%vort_xy(isd:ied, jsd:jed, nk))
+            allocate (CS%vort_xy_dx(isd:ied, jsd:jed, nk))
+            allocate (CS%vort_xy_dy(isd:ied, jsd:jed, nk))
+            allocate (CS%grad_vort_mag_h(isd:ied, jsd:jed, nk))
+            allocate (CS%grad_vort_mag_q(isd:ied, jsd:jed, nk))
+            allocate (CS%vert_vort_mag(isd:ied, jsd:jed, nk))
+            allocate (CS%Del2vort_q(isd:ied, jsd:jed, nk))
+            n2d = n2d + 4; n3d = n3d + 7
+        end if
 
         ! Modified Leith arrays
-        allocate (CS%div_xx(isd:ied, jsd:jed, nk))
-        allocate (CS%div_xx_dx(isd:ied, jsd:jed, nk))
-        allocate (CS%div_xx_dy(isd:ied, jsd:jed, nk))
-        allocate (CS%grad_div_mag_h(isd:ied, jsd:jed, nk))
-        allocate (CS%grad_div_mag_q(isd:ied, jsd:jed, nk))
+        if (CS%modified_Leith) then
+            allocate (CS%div_xx(isd:ied, jsd:jed, nk))
+            allocate (CS%div_xx_dx(isd:ied, jsd:jed, nk))
+            allocate (CS%div_xx_dy(isd:ied, jsd:jed, nk))
+            allocate (CS%grad_div_mag_h(isd:ied, jsd:jed, nk))
+            allocate (CS%grad_div_mag_q(isd:ied, jsd:jed, nk))
+            n3d = n3d + 5
+        end if
 
-        ! Compute total bytes: 30 2D arrays + 32 3D arrays of real(dp)
-        CS%nbytes = 30_int64 * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * 8_int64 + &
-                    32_int64 * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * int(nk, int64) * 8_int64
+        ! Stability bounding arrays
+        if (CS%better_bound_Kh .or. CS%better_bound_Ah) then
+            allocate (CS%hrat_min(isd:ied, jsd:jed, nk))
+            allocate (CS%visc_bound_rem(isd:ied, jsd:jed, nk))
+            n3d = n3d + 2
+        end if
+
+        ! Compute total bytes allocated
+        CS%nbytes = int(n2d, int64) * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * 8_int64 + &
+                    int(n3d, int64) * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * int(nk, int64) * 8_int64
 
     end subroutine allocate_hor_visc_arrays
 
@@ -421,48 +481,56 @@ contains
 
         if (.not. CS%initialized) return
 
-        ! Remove data from device before deallocating
-        !$omp target exit data map(delete: CS%Kh_bg_xx, CS%Kh_bg_xy, CS%Ah_bg_xx, CS%Ah_bg_xy)
-        !$omp target exit data map(delete: CS%Kh_Max_xx, CS%Kh_Max_xy, CS%Ah_Max_xx, CS%Ah_Max_xy)
-        !$omp target exit data map(delete: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
-        !$omp target exit data map(delete: CS%Biharm_const_xx, CS%Biharm_const_xy)
-        !$omp target exit data map(delete: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
-        !$omp target exit data map(delete: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+        ! Remove data from device before deallocating — always-needed arrays
+        !$omp target exit data map(delete: CS%Kh_bg_xx, CS%Kh_bg_xy)
+        !$omp target exit data map(delete: CS%Kh_Max_xx, CS%Kh_Max_xy)
         !$omp target exit data map(delete: CS%dx2h, CS%dy2h, CS%dx2q, CS%dy2q)
         !$omp target exit data map(delete: CS%DX_dyT, CS%DY_dxT, CS%DX_dyBu, CS%DY_dxBu)
-        !$omp target exit data map(delete: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
         !$omp target exit data map(delete: CS%reduction_xx, CS%reduction_xy)
-        !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
-        !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy, CS%str_xx, CS%str_xy)
-        !$omp target exit data map(delete: CS%bhstr_xx, CS%bhstr_xy)
-        !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
-        !$omp target exit data map(delete: CS%Kh, CS%Ah, CS%Shear_mag)
-        !$omp target exit data map(delete: CS%Del2u, CS%Del2v)
-        !$omp target exit data map(delete: CS%hrat_min, CS%visc_bound_rem)
-        !$omp target exit data map(delete: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
-        !$omp target exit data map(delete: CS%grad_vort_mag_h, CS%grad_vort_mag_q)
-        !$omp target exit data map(delete: CS%vert_vort_mag, CS%Del2vort_q)
-        !$omp target exit data map(delete: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
-        !$omp target exit data map(delete: CS%grad_div_mag_h, CS%grad_div_mag_q)
+        !$omp target exit data map(delete: CS%str_xx, CS%str_xy)
+
+        ! Conditional exit for work arrays (only allocated in full mode)
+        if (allocated(CS%dudx)) then
+            !$omp target exit data map(delete: CS%dudx, CS%dvdy, CS%dvdx, CS%dudy)
+            !$omp target exit data map(delete: CS%sh_xx, CS%sh_xy)
+            !$omp target exit data map(delete: CS%h_u, CS%h_v, CS%hq)
+            !$omp target exit data map(delete: CS%Kh)
+        end if
+
+        ! Conditional exit data for feature-specific arrays
+        if (allocated(CS%Ah_bg_xx)) then
+            !$omp target exit data map(delete: CS%Ah_bg_xx, CS%Ah_bg_xy)
+            !$omp target exit data map(delete: CS%Ah_Max_xx, CS%Ah_Max_xy)
+            !$omp target exit data map(delete: CS%Idx2dyCu, CS%Idxdy2u, CS%Idx2dyCv, CS%Idxdy2v)
+            !$omp target exit data map(delete: CS%Biharm_const_xx, CS%Biharm_const_xy)
+            !$omp target exit data map(delete: CS%bhstr_xx, CS%bhstr_xy)
+            !$omp target exit data map(delete: CS%Ah, CS%Del2u, CS%Del2v)
+        end if
+        if (allocated(CS%Laplac2_const_xx)) then
+            !$omp target exit data map(delete: CS%Laplac2_const_xx, CS%Laplac2_const_xy)
+            !$omp target exit data map(delete: CS%Shear_mag)
+        end if
+        if (allocated(CS%Laplac3_const_xx)) then
+            !$omp target exit data map(delete: CS%Laplac3_const_xx, CS%Laplac3_const_xy)
+            !$omp target exit data map(delete: CS%Biharm6_const_xx, CS%Biharm6_const_xy)
+            !$omp target exit data map(delete: CS%vort_xy, CS%vort_xy_dx, CS%vort_xy_dy)
+            !$omp target exit data map(delete: CS%grad_vort_mag_h, CS%grad_vort_mag_q)
+            !$omp target exit data map(delete: CS%vert_vort_mag, CS%Del2vort_q)
+        end if
+        if (allocated(CS%div_xx)) then
+            !$omp target exit data map(delete: CS%div_xx, CS%div_xx_dx, CS%div_xx_dy)
+            !$omp target exit data map(delete: CS%grad_div_mag_h, CS%grad_div_mag_q)
+        end if
+        if (allocated(CS%hrat_min)) then
+            !$omp target exit data map(delete: CS%hrat_min, CS%visc_bound_rem)
+        end if
         !$omp target exit data map(delete: CS)
 
-        ! Deallocate arrays
+        ! Deallocate all allocated arrays
         if (allocated(CS%Kh_bg_xx)) deallocate (CS%Kh_bg_xx)
         if (allocated(CS%Kh_bg_xy)) deallocate (CS%Kh_bg_xy)
-        if (allocated(CS%Ah_bg_xx)) deallocate (CS%Ah_bg_xx)
-        if (allocated(CS%Ah_bg_xy)) deallocate (CS%Ah_bg_xy)
         if (allocated(CS%Kh_Max_xx)) deallocate (CS%Kh_Max_xx)
         if (allocated(CS%Kh_Max_xy)) deallocate (CS%Kh_Max_xy)
-        if (allocated(CS%Ah_Max_xx)) deallocate (CS%Ah_Max_xx)
-        if (allocated(CS%Ah_Max_xy)) deallocate (CS%Ah_Max_xy)
-        if (allocated(CS%Laplac2_const_xx)) deallocate (CS%Laplac2_const_xx)
-        if (allocated(CS%Laplac2_const_xy)) deallocate (CS%Laplac2_const_xy)
-        if (allocated(CS%Biharm_const_xx)) deallocate (CS%Biharm_const_xx)
-        if (allocated(CS%Biharm_const_xy)) deallocate (CS%Biharm_const_xy)
-        if (allocated(CS%Laplac3_const_xx)) deallocate (CS%Laplac3_const_xx)
-        if (allocated(CS%Laplac3_const_xy)) deallocate (CS%Laplac3_const_xy)
-        if (allocated(CS%Biharm6_const_xx)) deallocate (CS%Biharm6_const_xx)
-        if (allocated(CS%Biharm6_const_xy)) deallocate (CS%Biharm6_const_xy)
         if (allocated(CS%dx2h)) deallocate (CS%dx2h)
         if (allocated(CS%dy2h)) deallocate (CS%dy2h)
         if (allocated(CS%dx2q)) deallocate (CS%dx2q)
@@ -471,10 +539,6 @@ contains
         if (allocated(CS%DY_dxT)) deallocate (CS%DY_dxT)
         if (allocated(CS%DX_dyBu)) deallocate (CS%DX_dyBu)
         if (allocated(CS%DY_dxBu)) deallocate (CS%DY_dxBu)
-        if (allocated(CS%Idx2dyCu)) deallocate (CS%Idx2dyCu)
-        if (allocated(CS%Idxdy2u)) deallocate (CS%Idxdy2u)
-        if (allocated(CS%Idx2dyCv)) deallocate (CS%Idx2dyCv)
-        if (allocated(CS%Idxdy2v)) deallocate (CS%Idxdy2v)
         if (allocated(CS%reduction_xx)) deallocate (CS%reduction_xx)
         if (allocated(CS%reduction_xy)) deallocate (CS%reduction_xy)
         if (allocated(CS%dudx)) deallocate (CS%dudx)
@@ -485,18 +549,32 @@ contains
         if (allocated(CS%sh_xy)) deallocate (CS%sh_xy)
         if (allocated(CS%str_xx)) deallocate (CS%str_xx)
         if (allocated(CS%str_xy)) deallocate (CS%str_xy)
-        if (allocated(CS%bhstr_xx)) deallocate (CS%bhstr_xx)
-        if (allocated(CS%bhstr_xy)) deallocate (CS%bhstr_xy)
         if (allocated(CS%h_u)) deallocate (CS%h_u)
         if (allocated(CS%h_v)) deallocate (CS%h_v)
         if (allocated(CS%hq)) deallocate (CS%hq)
         if (allocated(CS%Kh)) deallocate (CS%Kh)
+        if (allocated(CS%Ah_bg_xx)) deallocate (CS%Ah_bg_xx)
+        if (allocated(CS%Ah_bg_xy)) deallocate (CS%Ah_bg_xy)
+        if (allocated(CS%Ah_Max_xx)) deallocate (CS%Ah_Max_xx)
+        if (allocated(CS%Ah_Max_xy)) deallocate (CS%Ah_Max_xy)
+        if (allocated(CS%Idx2dyCu)) deallocate (CS%Idx2dyCu)
+        if (allocated(CS%Idxdy2u)) deallocate (CS%Idxdy2u)
+        if (allocated(CS%Idx2dyCv)) deallocate (CS%Idx2dyCv)
+        if (allocated(CS%Idxdy2v)) deallocate (CS%Idxdy2v)
+        if (allocated(CS%Biharm_const_xx)) deallocate (CS%Biharm_const_xx)
+        if (allocated(CS%Biharm_const_xy)) deallocate (CS%Biharm_const_xy)
+        if (allocated(CS%bhstr_xx)) deallocate (CS%bhstr_xx)
+        if (allocated(CS%bhstr_xy)) deallocate (CS%bhstr_xy)
         if (allocated(CS%Ah)) deallocate (CS%Ah)
-        if (allocated(CS%Shear_mag)) deallocate (CS%Shear_mag)
         if (allocated(CS%Del2u)) deallocate (CS%Del2u)
         if (allocated(CS%Del2v)) deallocate (CS%Del2v)
-        if (allocated(CS%hrat_min)) deallocate (CS%hrat_min)
-        if (allocated(CS%visc_bound_rem)) deallocate (CS%visc_bound_rem)
+        if (allocated(CS%Laplac2_const_xx)) deallocate (CS%Laplac2_const_xx)
+        if (allocated(CS%Laplac2_const_xy)) deallocate (CS%Laplac2_const_xy)
+        if (allocated(CS%Shear_mag)) deallocate (CS%Shear_mag)
+        if (allocated(CS%Laplac3_const_xx)) deallocate (CS%Laplac3_const_xx)
+        if (allocated(CS%Laplac3_const_xy)) deallocate (CS%Laplac3_const_xy)
+        if (allocated(CS%Biharm6_const_xx)) deallocate (CS%Biharm6_const_xx)
+        if (allocated(CS%Biharm6_const_xy)) deallocate (CS%Biharm6_const_xy)
         if (allocated(CS%vort_xy)) deallocate (CS%vort_xy)
         if (allocated(CS%vort_xy_dx)) deallocate (CS%vort_xy_dx)
         if (allocated(CS%vort_xy_dy)) deallocate (CS%vort_xy_dy)
@@ -509,6 +587,8 @@ contains
         if (allocated(CS%div_xx_dy)) deallocate (CS%div_xx_dy)
         if (allocated(CS%grad_div_mag_h)) deallocate (CS%grad_div_mag_h)
         if (allocated(CS%grad_div_mag_q)) deallocate (CS%grad_div_mag_q)
+        if (allocated(CS%hrat_min)) deallocate (CS%hrat_min)
+        if (allocated(CS%visc_bound_rem)) deallocate (CS%visc_bound_rem)
 
         CS%initialized = .false.
 
@@ -542,6 +622,12 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         Isq = is - 1; Ieq = ie; Jsq = js - 1; Jeq = je
         h_neglect = CS%h_neglect
+
+        ! Use memory-efficient fused kernels for simple Laplacian mode
+        if (CS%use_fused_kernels) then
+            call hor_visc_fused(u, v, h, diffu, diffv, G, GV, CS)
+            return
+        end if
 
         !$omp target data map(to: u, v, h) map(from: diffu, diffv)
 
@@ -1356,5 +1442,146 @@ contains
         !$omp end target data
 
     end subroutine hor_visc
+
+    !> Memory-efficient fused kernel implementation for Laplacian-only viscosity
+    !!
+    !! All intermediate values (dudx, dvdy, dvdx, dudy, sh_xx, sh_xy, h_u, h_v, hq)
+    !! are computed inline as private scalars, never stored in global memory.
+    !! Only str_xx and str_xy are written to global memory.
+    !!
+    subroutine hor_visc_fused(u, v, h, diffu, diffv, G, GV, CS)
+        type(ocean_grid_type), intent(in) :: G
+        type(verticalGrid_type), intent(in) :: GV
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: u
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: v
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(in) :: h
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffu
+        real(dp), dimension(G%isd:G%ied, G%jsd:G%jed, GV%ke), intent(out) :: diffv
+        type(hor_visc_CS), intent(inout) :: CS
+
+        ! Private scalars for fused computation (kept in registers)
+        real(dp) :: dudx_l, dvdy_l, sh_xx_l
+        real(dp) :: dvdx_l, dudy_l, sh_xy_l, hq_l
+        real(dp) :: h_u_l, h_v_l
+        real(dp) :: h_neglect
+
+        integer :: i, j, k, is, ie, js, je, nz, Isq, Ieq, Jsq, Jeq
+
+        is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
+        Isq = is - 1; Ieq = ie; Jsq = js - 1; Jeq = je
+        h_neglect = CS%h_neglect
+
+        !$omp target data map(to: u, v, h) map(from: diffu, diffv)
+
+        ! Initialize output to zero
+        !$omp target teams distribute parallel do collapse(3)
+        do k = 1, nz
+            do j = G%jsd, G%jed
+                do i = G%isd, G%ied
+                    diffu(i, j, k) = 0.0_dp
+                    diffv(i, j, k) = 0.0_dp
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 1: Compute str_xx at h-points
+        ! velocity gradients + strain + stress all in one pass
+        ! Intermediates (dudx, dvdy, sh_xx) stay in registers
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(dudx_l, dvdy_l, sh_xx_l)
+        do k = 1, nz
+            do j = Jsq, Jeq + 1
+                do i = Isq, Ieq + 1
+                    ! Velocity gradients (inline, register)
+                    dudx_l = CS%DY_dxT(i, j) * ((G%IdyCu(i, j) * u(i, j, k)) - &
+                                                 (G%IdyCu(i - 1, j) * u(i - 1, j, k)))
+                    dvdy_l = CS%DX_dyT(i, j) * ((G%IdxCv(i, j) * v(i, j, k)) - &
+                                                 (G%IdxCv(i, j - 1) * v(i, j - 1, k)))
+
+                    ! Strain tensor (inline, register)
+                    sh_xx_l = dudx_l - dvdy_l
+
+                    ! Stress tensor (write to global memory)
+                    CS%str_xx(i, j, k) = -CS%Kh_bg_xx(i, j) * sh_xx_l * &
+                                          h(i, j, k) * CS%reduction_xx(i, j)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 2: Compute str_xy at q-points
+        ! velocity gradients + strain + thickness + stress all in one pass
+        ! Intermediates (dvdx, dudy, sh_xy, hq) stay in registers
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(dvdx_l, dudy_l, sh_xy_l, hq_l)
+        do k = 1, nz
+            do J = Jsq, Jeq
+                do I = Isq, Ieq
+                    ! Velocity gradients (inline, register)
+                    dvdx_l = CS%DY_dxBu(I, J) * ((v(i + 1, J, k) * G%IdyCv(i + 1, J)) - &
+                                                  (v(i, J, k) * G%IdyCv(i, J)))
+                    dudy_l = CS%DX_dyBu(I, J) * ((u(I, j + 1, k) * G%IdxCu(I, j + 1)) - &
+                                                  (u(I, j, k) * G%IdxCu(I, j)))
+
+                    ! Strain tensor with free-slip BC (inline, register)
+                    sh_xy_l = G%mask2dBu(I, J) * (dvdx_l + dudy_l)
+
+                    ! Thickness at q-point (inline, register)
+                    hq_l = 0.25_dp * ((h(i, j, k) + h(i + 1, j + 1, k)) + &
+                                       (h(i + 1, j, k) + h(i, j + 1, k)))
+
+                    ! Stress tensor (write to global memory)
+                    CS%str_xy(I, J, k) = -CS%Kh_bg_xy(I, J) * sh_xy_l * &
+                                          hq_l * G%mask2dBu(I, J) * CS%reduction_xy(I, J)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 3: Compute diffu with h_u inline
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(h_u_l)
+        do k = 1, nz
+            do j = js, je
+                do I = Isq, Ieq
+                    ! Thickness at u-point (inline, register)
+                    h_u_l = 0.5_dp * (G%mask2dT(i, j) * h(i, j, k) + &
+                                       G%mask2dT(i + 1, j) * h(i + 1, j, k))
+
+                    ! Viscous acceleration
+                    diffu(I, j, k) = ((G%IdxCu(I, j) * ((CS%dx2q(I, j - 1) * CS%str_xy(I, j - 1, k)) - &
+                                                         (CS%dx2q(I, j) * CS%str_xy(I, j, k))) + &
+                                       G%IdyCu(I, j) * ((CS%dy2h(i, j) * CS%str_xx(i, j, k)) - &
+                                                         (CS%dy2h(i + 1, j) * CS%str_xx(i + 1, j, k)))) * &
+                                      G%IareaCu(I, j)) / (h_u_l + h_neglect)
+                end do
+            end do
+        end do
+
+        !=====================================================================
+        ! FUSED KERNEL 4: Compute diffv with h_v inline
+        !=====================================================================
+        !$omp target teams distribute parallel do collapse(3) private(h_v_l)
+        do k = 1, nz
+            do J = Jsq, Jeq
+                do i = is, ie
+                    ! Thickness at v-point (inline, register)
+                    h_v_l = 0.5_dp * (G%mask2dT(i, j) * h(i, j, k) + &
+                                       G%mask2dT(i, j + 1) * h(i, j + 1, k))
+
+                    ! Viscous acceleration
+                    diffv(i, J, k) = ((G%IdyCv(i, J) * ((CS%dy2q(i - 1, J) * CS%str_xy(i - 1, J, k)) - &
+                                                         (CS%dy2q(i, J) * CS%str_xy(i, J, k))) - &
+                                       G%IdxCv(i, J) * ((CS%dx2h(i, j) * CS%str_xx(i, j, k)) - &
+                                                         (CS%dx2h(i, j + 1) * CS%str_xx(i, j + 1, k)))) * &
+                                      G%IareaCv(i, J)) / (h_v_l + h_neglect)
+                end do
+            end do
+        end do
+
+        !$omp end target data
+
+    end subroutine hor_visc_fused
 
 end module mom6_hor_visc_omp

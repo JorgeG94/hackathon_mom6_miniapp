@@ -8,6 +8,7 @@
 module mom6_coriolis_cuda
     use cudafor
     use iso_fortran_env, only: dp => real64
+    use cuda_workspace, only: cuda_workspace_type
     implicit none
     private
 
@@ -26,21 +27,8 @@ module mom6_coriolis_cuda
         integer :: is, ie, js, je, nz
         integer :: isd, ied, jsd, jed
 
-        ! 3D device work arrays
-        real(dp), device, allocatable :: dvdx(:,:,:)
-        real(dp), device, allocatable :: dudy(:,:,:)
-        real(dp), device, allocatable :: rel_vort(:,:,:)
-        real(dp), device, allocatable :: abs_vort(:,:,:)
-        real(dp), device, allocatable :: q_d(:,:,:)
-        real(dp), device, allocatable :: Ih_q(:,:,:)
-        real(dp), device, allocatable :: hArea_u(:,:,:)
-        real(dp), device, allocatable :: hArea_v(:,:,:)
+        ! 3D persistent device array (computed once at init)
         real(dp), device, allocatable :: Area_q(:,:,:)
-        real(dp), device, allocatable :: KE_d(:,:,:)
-        real(dp), device, allocatable :: a_d(:,:,:)
-        real(dp), device, allocatable :: b_d(:,:,:)
-        real(dp), device, allocatable :: c_d(:,:,:)
-        real(dp), device, allocatable :: d_d(:,:,:)
 
         ! 2D device grid metrics (copied once at init)
         real(dp), device, allocatable :: dyCv_d(:,:)
@@ -616,21 +604,8 @@ contains
         CS%isd = isd; CS%ied = ied; CS%jsd = jsd; CS%jed = jed
         CS%is = isc; CS%ie = iec; CS%js = jsc; CS%je = jec; CS%nz = nk
 
-        ! Allocate 3D device work arrays
-        allocate(CS%dvdx(isd:ied, jsd:jed, nk))
-        allocate(CS%dudy(isd:ied, jsd:jed, nk))
-        allocate(CS%rel_vort(isd:ied, jsd:jed, nk))
-        allocate(CS%abs_vort(isd:ied, jsd:jed, nk))
-        allocate(CS%q_d(isd:ied, jsd:jed, nk))
-        allocate(CS%Ih_q(isd:ied, jsd:jed, nk))
-        allocate(CS%hArea_u(isd:ied, jsd:jed, nk))
-        allocate(CS%hArea_v(isd:ied, jsd:jed, nk))
+        ! Allocate persistent 3D device array
         allocate(CS%Area_q(isd:ied, jsd:jed, nk))
-        allocate(CS%KE_d(isd:ied, jsd:jed, nk))
-        allocate(CS%a_d(isd:ied, jsd:jed, nk))
-        allocate(CS%b_d(isd:ied, jsd:jed, nk))
-        allocate(CS%c_d(isd:ied, jsd:jed, nk))
-        allocate(CS%d_d(isd:ied, jsd:jed, nk))
 
         ! Allocate 2D device grid metrics and copy from host
         allocate(CS%dyCv_d(isd:ied, jsd:jed));       CS%dyCv_d = dyCv
@@ -678,20 +653,7 @@ contains
         istat = cudaEventDestroy(CS%event_ke_done)
 
         ! Deallocate device arrays
-        if (allocated(CS%dvdx)) deallocate(CS%dvdx)
-        if (allocated(CS%dudy)) deallocate(CS%dudy)
-        if (allocated(CS%rel_vort)) deallocate(CS%rel_vort)
-        if (allocated(CS%abs_vort)) deallocate(CS%abs_vort)
-        if (allocated(CS%q_d)) deallocate(CS%q_d)
-        if (allocated(CS%Ih_q)) deallocate(CS%Ih_q)
-        if (allocated(CS%hArea_u)) deallocate(CS%hArea_u)
-        if (allocated(CS%hArea_v)) deallocate(CS%hArea_v)
         if (allocated(CS%Area_q)) deallocate(CS%Area_q)
-        if (allocated(CS%KE_d)) deallocate(CS%KE_d)
-        if (allocated(CS%a_d)) deallocate(CS%a_d)
-        if (allocated(CS%b_d)) deallocate(CS%b_d)
-        if (allocated(CS%c_d)) deallocate(CS%c_d)
-        if (allocated(CS%d_d)) deallocate(CS%d_d)
         if (allocated(CS%dyCv_d)) deallocate(CS%dyCv_d)
         if (allocated(CS%dxCu_d)) deallocate(CS%dxCu_d)
         if (allocated(CS%areaT_d)) deallocate(CS%areaT_d)
@@ -707,8 +669,9 @@ contains
 
     end subroutine coriolis_end_cuda
 
-    subroutine CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS, bx_in, by_in)
+    subroutine CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS, ws, bx_in, by_in)
         type(coriolis_CS_cuda), intent(inout) :: CS
+        type(cuda_workspace_type), intent(inout) :: ws
         real(dp), device, intent(in)  :: u_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in)  :: v_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in)  :: h_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
@@ -720,6 +683,11 @@ contains
 
         integer :: n1, n2, n3, is_l, ie_l, js_l, je_l, istat, bx, by
         type(dim3) :: grid, tBlock
+
+        ! Workspace slot aliases:
+        ! Phase 1: dvdx→1, dudy→2, hArea_u→3, hArea_v→4, KE→5
+        ! Phase 2: rel_vort→6, abs_vort→7, q_d→8, Ih_q→9
+        ! Phase 3a: a→1, b→2, c→3, d→4 (reuse dead Phase 1 slots)
 
         ! Configurable block dimensions (default: 32 x 8 x 1 = 256 threads)
         bx = 32; by = 8
@@ -744,40 +712,50 @@ contains
 
         ! Phase 1: circulation, area-weighted thickness, KE (all from inputs)
         call phase1_kernel<<<grid, tBlock>>>( &
-            CS%dvdx, CS%dudy, CS%hArea_u, CS%hArea_v, CS%KE_d, &
+            ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+            ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), ws%s3d(:,:,1:n3,5), &
             u_d, v_d, h_d, CS%dyCv_d, CS%dxCu_d, CS%dyCu_d, CS%dxCv_d, CS%areaT_d, &
             n1, n2, n3, is_l, ie_l, js_l, je_l)
 
         ! Phase 2: vorticity and PV (needs Phase 1 results at neighbors)
         call vorticity_pv_kernel<<<grid, tBlock>>>( &
-            CS%rel_vort, CS%abs_vort, CS%q_d, CS%Ih_q, &
-            CS%dvdx, CS%dudy, CS%hArea_u, CS%hArea_v, CS%Area_q, &
+            ws%s3d(:,:,1:n3,6), ws%s3d(:,:,1:n3,7), &
+            ws%s3d(:,:,1:n3,8), ws%s3d(:,:,1:n3,9), &
+            ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+            ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), CS%Area_q, &
             CS%IareaBu_d, CS%CoriolisBu_d, CS%mask2dBu_d, &
             n1, n2, n3, is_l, ie_l, js_l, je_l)
 
         ! Phase 3: Coriolis accelerations (scheme-dependent)
+        ! After Phase 2: slots 1-4,6,7,9 are dead; 5(KE) and 8(q_d) still live
         if (CS%Coriolis_Scheme == SADOURNY75_ENERGY_CUDA) then
             call coriolis_sadourny_kernel<<<grid, tBlock>>>( &
-                CAu_d, CAv_d, CS%q_d, CS%KE_d, uh_d, vh_d, &
+                CAu_d, CAv_d, ws%s3d(:,:,1:n3,8), ws%s3d(:,:,1:n3,5), &
+                uh_d, vh_d, &
                 CS%IdxCu_d, CS%IdyCv_d, &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
 
         else if (CS%Coriolis_Scheme == ARAKAWA_HSU90_CUDA) then
+            ! Reuse slots 1-4 for Arakawa coefficients a,b,c,d
             call arakawa_hsu90_coef_kernel<<<grid, tBlock>>>( &
-                CS%a_d, CS%b_d, CS%c_d, CS%d_d, CS%q_d, &
+                ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), ws%s3d(:,:,1:n3,8), &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
             call coriolis_arakawa_kernel<<<grid, tBlock>>>( &
-                CAu_d, CAv_d, CS%a_d, CS%b_d, CS%c_d, CS%d_d, &
-                CS%KE_d, uh_d, vh_d, CS%IdxCu_d, CS%IdyCv_d, &
+                CAu_d, CAv_d, ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), &
+                ws%s3d(:,:,1:n3,5), uh_d, vh_d, CS%IdxCu_d, CS%IdyCv_d, &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
 
         else if (CS%Coriolis_Scheme == ARAKAWA_LAMB81_CUDA) then
             call arakawa_lamb81_coef_kernel<<<grid, tBlock>>>( &
-                CS%a_d, CS%b_d, CS%c_d, CS%d_d, CS%q_d, &
+                ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), ws%s3d(:,:,1:n3,8), &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
             call coriolis_arakawa_kernel<<<grid, tBlock>>>( &
-                CAu_d, CAv_d, CS%a_d, CS%b_d, CS%c_d, CS%d_d, &
-                CS%KE_d, uh_d, vh_d, CS%IdxCu_d, CS%IdyCv_d, &
+                CAu_d, CAv_d, ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                ws%s3d(:,:,1:n3,3), ws%s3d(:,:,1:n3,4), &
+                ws%s3d(:,:,1:n3,5), uh_d, vh_d, CS%IdxCu_d, CS%IdyCv_d, &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
         end if
 
@@ -789,8 +767,9 @@ contains
     !> Fused single-kernel Coriolis solver (Sadourny scheme only).
     !! Computes CAu and CAv in one kernel launch by recomputing all intermediates
     !! (PV, KE) inline — eliminates intermediate 3D array traffic.
-    subroutine CorAdCalc_cuda_fused(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS, bx_in, by_in)
+    subroutine CorAdCalc_cuda_fused(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS, ws, bx_in, by_in)
         type(coriolis_CS_cuda), intent(inout) :: CS
+        type(cuda_workspace_type), intent(inout) :: ws  ! unused by fused kernel, for consistent interface
         real(dp), device, intent(in)  :: u_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in)  :: v_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in)  :: h_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
