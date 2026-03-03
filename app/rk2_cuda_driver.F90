@@ -14,8 +14,8 @@ program rk2_cuda_driver
     use cudafor
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          end_ocean_grid, G_EARTH, PI
+    use mom6_types, only: ocean_grid_type, verticalGrid_type, &
+                          G_EARTH, PI, OMEGA, EARTH_RADIUS
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
 
@@ -135,9 +135,9 @@ program rk2_cuda_driver
     call profiler_start("Initialization")
     t_init_start = omp_get_wtime()
 
-    ! Initialize grid
-    call init_ocean_grid(G, ni, nj, nk, 10.0_dp, 45.0_dp)
-    ! Initialize vertical grid directly (no OpenACC transfer needed for CUDA driver)
+    ! Initialize grid (no OpenACC transfers for CUDA driver)
+    call init_ocean_grid_cuda(G, ni, nj, nk, 10.0_dp, 45.0_dp)
+    ! Initialize vertical grid directly
     GV%ke = nk
     GV%Angstrom_H = 1.0e-10_dp
 
@@ -441,7 +441,7 @@ program rk2_cuda_driver
     call barotropic_end_cuda(bt_CS_cuda)
     call vert_visc_end_cuda(visc_CS)
     call hor_visc_end_cuda(hvisc_CS)
-    call end_ocean_grid(G)
+    call end_ocean_grid_cuda(G)
 
     deallocate (u_h, v_h, h_h, h0_h, uh_h, vh_h)
     deallocate (eta_h, ubt_h, vbt_h)
@@ -797,5 +797,142 @@ contains
         deallocate(f_4_u, f_4_v, bt_rem_u, bt_rem_v)
 
     end subroutine barotropic_init_cuda_from_grid
+
+    !> Initialize ocean grid without OpenACC data transfers (for CUDA driver)
+    subroutine init_ocean_grid_cuda(G, ni, nj, nk, dx_km, lat_deg)
+        type(ocean_grid_type), intent(inout) :: G
+        integer, intent(in) :: ni, nj, nk
+        real(dp), intent(in) :: dx_km, lat_deg
+
+        real(dp) :: dx_m, f0, beta
+        integer :: i, j
+
+        ! Store dimensions
+        G%ni = ni; G%nj = nj; G%nk = nk
+
+        ! With halo: index bounds
+        G%isd = 1; G%ied = ni + 2
+        G%jsd = 1; G%jed = nj + 2
+        G%isc = G%isd + 3; G%iec = G%ied - 3
+        G%jsc = G%jsd + 3; G%jec = G%jed - 3
+
+        ! Grid spacing
+        dx_m = dx_km * 1000.0_dp
+        G%dx = dx_m; G%dy = dx_m
+
+        ! Allocate arrays
+        allocate(G%IareaT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%areaT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dy_Cu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%areaBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%CoriolisBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IareaCv(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dxBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%dyBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdxBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%IdyBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%bathyT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dT(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dBu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dCu(G%isd:G%ied, G%jsd:G%jed))
+        allocate(G%mask2dCv(G%isd:G%ied, G%jsd:G%jed))
+
+        ! Beta-plane Coriolis
+        f0 = 2.0_dp * OMEGA * sin(lat_deg * PI / 180.0_dp)
+        beta = 2.0_dp * OMEGA * cos(lat_deg * PI / 180.0_dp) / EARTH_RADIUS
+
+        ! Initialize grid metrics
+        do j = G%jsd, G%jed
+            do i = G%isd, G%ied
+                G%areaT(i,j) = dx_m * dx_m
+                G%IareaT(i,j) = 1.0_dp / (dx_m * dx_m)
+                G%dxT(i,j) = dx_m
+                G%dyT(i,j) = dx_m
+                G%IdxT(i,j) = 1.0_dp / dx_m
+                G%IdyT(i,j) = 1.0_dp / dx_m
+                G%dxCu(i,j) = dx_m
+                G%dyCu(i,j) = dx_m
+                G%dy_Cu(i,j) = dx_m
+                G%IdxCu(i,j) = 1.0_dp / dx_m
+                G%IdyCu(i,j) = 1.0_dp / dx_m
+                G%dxCv(i,j) = dx_m
+                G%dyCv(i,j) = dx_m
+                G%IdxCv(i,j) = 1.0_dp / dx_m
+                G%IdyCv(i,j) = 1.0_dp / dx_m
+                G%areaBu(i,j) = dx_m * dx_m
+                G%IareaBu(i,j) = 1.0_dp / (dx_m * dx_m)
+                G%IareaCu(i,j) = 1.0_dp / (dx_m * dx_m)
+                G%IareaCv(i,j) = 1.0_dp / (dx_m * dx_m)
+                G%dxBu(i,j) = dx_m
+                G%dyBu(i,j) = dx_m
+                G%IdxBu(i,j) = 1.0_dp / dx_m
+                G%IdyBu(i,j) = 1.0_dp / dx_m
+                G%mask2dT(i,j) = 1.0_dp
+                G%mask2dBu(i,j) = 1.0_dp
+                G%mask2dCu(i,j) = 1.0_dp
+                G%mask2dCv(i,j) = 1.0_dp
+                G%bathyT(i,j) = 4000.0_dp
+                G%CoriolisBu(i,j) = f0 + beta * (real(j - 1 - nj/2, dp) - 0.5_dp) * dx_m
+            end do
+        end do
+
+        G%first_direction = 0
+        G%nbytes = 29_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
+
+        ! NO OpenACC data transfers - grid stays on host only
+        ! CUDA kernels will access grid data via explicit copies in their init routines
+
+    end subroutine init_ocean_grid_cuda
+
+    !> Deallocate ocean grid without OpenACC (for CUDA driver)
+    subroutine end_ocean_grid_cuda(G)
+        type(ocean_grid_type), intent(inout) :: G
+
+        ! NO OpenACC exit data - grid was never on OpenACC device
+        if (allocated(G%IareaT)) deallocate(G%IareaT)
+        if (allocated(G%areaT)) deallocate(G%areaT)
+        if (allocated(G%dxT)) deallocate(G%dxT)
+        if (allocated(G%dyT)) deallocate(G%dyT)
+        if (allocated(G%IdxT)) deallocate(G%IdxT)
+        if (allocated(G%IdyT)) deallocate(G%IdyT)
+        if (allocated(G%dxCu)) deallocate(G%dxCu)
+        if (allocated(G%dyCu)) deallocate(G%dyCu)
+        if (allocated(G%dy_Cu)) deallocate(G%dy_Cu)
+        if (allocated(G%IdxCu)) deallocate(G%IdxCu)
+        if (allocated(G%IdyCu)) deallocate(G%IdyCu)
+        if (allocated(G%dxCv)) deallocate(G%dxCv)
+        if (allocated(G%dyCv)) deallocate(G%dyCv)
+        if (allocated(G%IdxCv)) deallocate(G%IdxCv)
+        if (allocated(G%IdyCv)) deallocate(G%IdyCv)
+        if (allocated(G%IareaBu)) deallocate(G%IareaBu)
+        if (allocated(G%areaBu)) deallocate(G%areaBu)
+        if (allocated(G%CoriolisBu)) deallocate(G%CoriolisBu)
+        if (allocated(G%IareaCu)) deallocate(G%IareaCu)
+        if (allocated(G%IareaCv)) deallocate(G%IareaCv)
+        if (allocated(G%dxBu)) deallocate(G%dxBu)
+        if (allocated(G%dyBu)) deallocate(G%dyBu)
+        if (allocated(G%IdxBu)) deallocate(G%IdxBu)
+        if (allocated(G%IdyBu)) deallocate(G%IdyBu)
+        if (allocated(G%bathyT)) deallocate(G%bathyT)
+        if (allocated(G%mask2dT)) deallocate(G%mask2dT)
+        if (allocated(G%mask2dBu)) deallocate(G%mask2dBu)
+        if (allocated(G%mask2dCu)) deallocate(G%mask2dCu)
+        if (allocated(G%mask2dCv)) deallocate(G%mask2dCv)
+
+    end subroutine end_ocean_grid_cuda
 
 end program rk2_cuda_driver
