@@ -20,7 +20,9 @@ program rk2_mpi_cuda_driver
 
     ! CUDA kernel modules
     use mom6_continuity_cuda, only: continuity_CS_cuda, continuity_init_cuda, &
-                                     continuity_PPM_cuda, continuity_end_cuda
+                                     continuity_PPM_cuda, continuity_end_cuda, &
+                                     BT_cont_type_cuda, alloc_BT_cont_type_cuda, &
+                                     dealloc_BT_cont_type_cuda
     use mom6_coriolis_cuda, only: coriolis_CS_cuda, coriolis_init_cuda, &
                                    CorAdCalc_cuda, coriolis_end_cuda, &
                                    SADOURNY75_ENERGY_CUDA
@@ -74,6 +76,14 @@ program rk2_mpi_cuda_driver
     real(dp), device, allocatable :: ubt_av_d(:,:), vbt_av_d(:,:), eta_av_d(:,:)
     real(dp), device, allocatable :: taux_d(:,:), tauy_d(:,:)
     real(dp), device, allocatable :: dyCu_d(:,:), dxCv_d(:,:)
+
+    ! Device arrays for full continuity solver
+    real(dp), device, allocatable :: por_face_areaU_d(:,:,:)
+    real(dp), device, allocatable :: visc_rem_u_d(:,:,:)
+    real(dp), device, allocatable :: uhbt_cont_d(:,:)
+    real(dp), device, allocatable :: u_cor_d(:,:,:)
+    real(dp), device, allocatable :: du_cor_d(:,:)
+    type(BT_cont_type_cuda) :: BT_cont_cuda
 
     ! Timing
     real(dp) :: t_start, t_end, t_init_start, t_init_end
@@ -168,7 +178,8 @@ program rk2_mpi_cuda_driver
     ! Continuity CUDA init
     call continuity_init_cuda(cont_CS, G%isd, G%ied, G%jsd, G%jed, &
                               G%isc, G%iec, G%jsc, G%jec, nk, &
-                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true.)
+                              G%IareaT, G%IdxT, G%dy_Cu, G%mask2dT, .true., &
+                              G%dxT, G%areaT, G%dxCu, G%mask2dCu)
 
     ! Coriolis CUDA init
     call coriolis_init_cuda(cor_CS, G%isd, G%ied, G%jsd, G%jed, &
@@ -246,6 +257,16 @@ program rk2_mpi_cuda_driver
     allocate(dxCv_d(G%isd:G%ied, G%jsd:G%jed))
     dyCu_d = G%dyCu
     dxCv_d = G%dxCv
+    ! Full continuity solver device arrays
+    allocate(por_face_areaU_d(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate(visc_rem_u_d(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate(uhbt_cont_d(G%isd:G%ied, G%jsd:G%jed))
+    allocate(u_cor_d(G%isd:G%ied, G%jsd:G%jed, nk))
+    allocate(du_cor_d(G%isd:G%ied, G%jsd:G%jed))
+    por_face_areaU_d = 1.0_dp
+    visc_rem_u_d = 1.0_dp
+    uhbt_cont_d = 0.0_dp
+    call alloc_BT_cont_type_cuda(BT_cont_cuda, G%isd, G%ied, G%jsd, G%jed, nk)
 
     ! Initialize host state using global coordinates
     call initialize_state_mpi(u_h, v_h, h_h, h0_h, eta_h, ubt_h, vbt_h, G, GV, MD)
@@ -286,7 +307,9 @@ program rk2_mpi_cuda_driver
     call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
     call vert_visc_cra_cuda(u_d, v_d, h_d, dt, visc_CS, taux_d, tauy_d)
     call btstep_cuda(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d, bt_CS_cuda)
-    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS)
+    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS, &
+                             por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
+                             u_cor_d, BT_cont_cuda, du_cor_d)
 
     ! Reset after warmup
     u_d = u_h; v_d = v_h; h_d = h_h
@@ -394,7 +417,9 @@ program rk2_mpi_cuda_driver
         ! 7. Continuity
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
-        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS)
+        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS, &
+                                 por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
+                                 u_cor_d, BT_cont_cuda, du_cor_d)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -476,7 +501,9 @@ program rk2_mpi_cuda_driver
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
         htmp_d = h_d
-        call continuity_PPM_cuda(u_d, htmp_d, h_d, uh_d, 0.5_dp*dt, cont_CS)
+        call continuity_PPM_cuda(u_d, htmp_d, h_d, uh_d, 0.5_dp*dt, cont_CS, &
+                                 por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
+                                 u_cor_d, BT_cont_cuda, du_cor_d)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -541,6 +568,7 @@ program rk2_mpi_cuda_driver
     ! CLEANUP
     !=========================================================================
     call profiler_start("Finalize")
+    call dealloc_BT_cont_type_cuda(BT_cont_cuda)
     call continuity_end_cuda(cont_CS)
     call coriolis_end_cuda(cor_CS)
     call barotropic_end_cuda(bt_CS_cuda)
@@ -554,6 +582,7 @@ program rk2_mpi_cuda_driver
     deallocate(CAu_d, CAv_d, up_d, vp_d, diffu_d, diffv_d)
     deallocate(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d)
     deallocate(taux_d, tauy_d, dyCu_d, dxCv_d)
+    deallocate(por_face_areaU_d, visc_rem_u_d, uhbt_cont_d, u_cor_d, du_cor_d)
     call profiler_stop("Finalize")
 
     call profiler_stop("Total")
