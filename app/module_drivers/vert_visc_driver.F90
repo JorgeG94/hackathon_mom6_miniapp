@@ -2,7 +2,7 @@
 program vert_visc_driver
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid, RHO_0, &
+                          init_verticalGrid, end_ocean_grid, RHO_0, PI, &
                           mech_forcing_type, vertvisc_type, &
                           init_mech_forcing, end_mech_forcing, &
                           init_vertvisc_visc, end_vertvisc_visc
@@ -25,7 +25,6 @@ program vert_visc_driver
     real(dp) :: t_fused, t_fused_total
     integer(int64) :: total_bytes
     real(dp) :: Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
-    real(dp), parameter :: PI = 3.14159265358979_dp
     integer :: ni, nj, nk, niter, iter, i, j, k
     integer :: clock_start, clock_end, clock_rate
     character(len=32) :: arg

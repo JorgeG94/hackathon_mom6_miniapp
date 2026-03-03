@@ -15,7 +15,7 @@ program rk2_cuda_driver
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid, G_EARTH
+                          init_verticalGrid, end_ocean_grid, G_EARTH, PI
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
 
@@ -37,7 +37,6 @@ program rk2_cuda_driver
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc_end
     implicit none
 
-    real(dp), parameter :: PI = 3.14159265358979_dp
 
     ! Grid structures
     type(ocean_grid_type) :: G

@@ -2,7 +2,7 @@
 program coriolis_driver
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid
+                          init_verticalGrid, end_ocean_grid, PI
     use mom6_coriolis, only: coriolis_CS, coriolis_init, CorAdCalc, coriolis_end, &
                              SADOURNY75_ENERGY, ARAKAWA_HSU90, ARAKAWA_LAMB81
     implicit none
@@ -84,9 +84,9 @@ program coriolis_driver
       do j=G%jsd,G%jed
         do i=G%isd,G%ied
         h(i, j, k) = 4000.0_dp/real(nk, dp)
-        u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)* &
+        u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*PI*2.0_dp)* &
                      exp(-real(k, dp)/30.0_dp)
-        v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp*2.0_dp)* &
+        v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(ni, dp)*PI*2.0_dp)* &
                      exp(-real(k, dp)/30.0_dp)
         uh(i, j, k) = u(i, j, k)*h(i, j, k)*G%dyCu(i, j)
         vh(i, j, k) = v(i, j, k)*h(i, j, k)*G%dxCv(i, j)

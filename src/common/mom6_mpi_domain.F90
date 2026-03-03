@@ -7,7 +7,7 @@
 module mom6_mpi_domain
     use mpi
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type, OMEGA
+    use mom6_types, only: ocean_grid_type, verticalGrid_type, OMEGA, PI, EARTH_RADIUS
     implicit none
     private
 
@@ -216,8 +216,8 @@ contains
         allocate(G%mask2dCv(G%isd:G%ied, G%jsd:G%jed))
 
         ! Beta-plane Coriolis parameters
-        f0 = 2.0_dp * OMEGA * sin(lat_deg * 3.14159265358979_dp / 180.0_dp)
-        beta = 2.0_dp * OMEGA * cos(lat_deg * 3.14159265358979_dp / 180.0_dp) / 6.371e6_dp
+        f0 = 2.0_dp * OMEGA * sin(lat_deg * PI / 180.0_dp)
+        beta = 2.0_dp * OMEGA * cos(lat_deg * PI / 180.0_dp) / EARTH_RADIUS
 
         ! Initialize grid metrics (uniform except Coriolis)
         do j = G%jsd, G%jed

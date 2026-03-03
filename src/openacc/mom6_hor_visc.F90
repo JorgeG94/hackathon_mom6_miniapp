@@ -21,7 +21,7 @@
 !!
 module mom6_hor_visc
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type
+    use mom6_types, only: ocean_grid_type, verticalGrid_type, PI
     implicit none
     private
 
@@ -155,8 +155,8 @@ module mom6_hor_visc
         integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type hor_visc_CS
 
-    real(dp), parameter :: inv_PI3 = 1.0_dp/(3.14159265358979_dp**3)
-    real(dp), parameter :: inv_PI6 = 1.0_dp/(3.14159265358979_dp**6)
+    real(dp), parameter :: inv_PI3 = 1.0_dp/(PI**3)
+    real(dp), parameter :: inv_PI6 = 1.0_dp/(PI**6)
 
 contains
 

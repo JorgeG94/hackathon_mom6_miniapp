@@ -7,7 +7,7 @@ program continuity_cuda_driver
     use iso_fortran_env, only: dp => real64
     use cudafor
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          init_ocean_grid, init_verticalGrid, end_ocean_grid
+                          init_ocean_grid, init_verticalGrid, end_ocean_grid, PI
     use mom6_continuity_cuda, only: continuity_CS_cuda, continuity_init_cuda, &
                                      continuity_PPM_cuda, continuity_end_cuda
     implicit none
@@ -78,10 +78,10 @@ program continuity_cuda_driver
         do j = G%jsd, G%jed
             do i = G%isd, G%ied
                 hin(i, j, k) = 4000.0_dp/real(nk, dp) + &
-                    10.0_dp * sin(real(i - 1, dp)/real(ni, dp) * 3.14159_dp) * &
-                    cos(real(j - 1, dp)/real(nj, dp) * 3.14159_dp) * exp(-real(k, dp)/20.0_dp)
+                    10.0_dp * sin(real(i - 1, dp)/real(ni, dp) * PI) * &
+                    cos(real(j - 1, dp)/real(nj, dp) * PI) * exp(-real(k, dp)/20.0_dp)
                 h(i, j, k) = hin(i, j, k)
-                u(i, j, k) = 0.1_dp * sin(real(j - 1, dp)/real(nj, dp) * 3.14159_dp * 2.0_dp) * &
+                u(i, j, k) = 0.1_dp * sin(real(j - 1, dp)/real(nj, dp) * PI * 2.0_dp) * &
                     exp(-real(k, dp)/30.0_dp)
             end do
         end do

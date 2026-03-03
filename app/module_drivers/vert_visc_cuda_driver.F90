@@ -4,7 +4,7 @@ program vert_visc_cuda_driver
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid
+                          init_verticalGrid, end_ocean_grid, PI
     use mom6_vert_visc_cuda, only: vert_visc_CS_cuda, vert_visc_init_cuda, &
                                     vert_visc_cra_cuda, vert_visc_end_cuda
     implicit none
@@ -24,7 +24,6 @@ program vert_visc_cuda_driver
     real(dp) :: t_start, t_end, t_total
     real(dp) :: dt, Kv, Kv_ml, Kv_extra_bbl, Hmix, Hbbl
     real(dp) :: max_u, max_v
-    real(dp), parameter :: PI = 3.14159265358979_dp
     integer  :: ni, nj, nk, niter, iter, i, j, k
     character(len=32) :: arg
 

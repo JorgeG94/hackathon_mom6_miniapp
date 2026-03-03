@@ -11,7 +11,7 @@ program rk2_mpi_cuda_driver
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          end_ocean_grid, G_EARTH
+                          end_ocean_grid, G_EARTH, HALO_WIDTH, PI
     use mom6_mpi_domain, only: mpi_domain_type, mpi_domain_init, &
                                mpi_domain_end, init_ocean_grid_mpi
     use mom6_mpi_halo_cuda, only: halo_exchange_3d_cuda, halo_exchange_2d_cuda, halo_cleanup_cuda
@@ -38,7 +38,6 @@ program rk2_mpi_cuda_driver
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc_end
     implicit none
 
-    real(dp), parameter :: PI = 3.14159265358979_dp
 
     ! Grid structures
     type(ocean_grid_type) :: G
@@ -259,13 +258,13 @@ program rk2_mpi_cuda_driver
     call initialize_stress_mpi(taux_d, tauy_d, G, MD)
 
     ! Initial halo exchanges
-    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h0_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-    call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h0_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
 
     t_init_end = omp_get_wtime()
     call profiler_stop("Initialization")
@@ -294,9 +293,9 @@ program rk2_mpi_cuda_driver
     eta_d = eta_h; ubt_d = ubt_h; vbt_d = vbt_h
 
     ! Re-exchange halos after reset
-    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+    call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+    call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
     call profiler_stop("Warmup")
 
     !=========================================================================
@@ -329,8 +328,8 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: uh, vh
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -387,8 +386,8 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: up, vp
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(up_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vp_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(up_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vp_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -403,7 +402,7 @@ program rk2_mpi_cuda_driver
         ! Halo exchange: h
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -418,8 +417,8 @@ program rk2_mpi_cuda_driver
 
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
+        call halo_exchange_3d_cuda(uh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(vh_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 
@@ -485,12 +484,12 @@ program rk2_mpi_cuda_driver
         ! End-of-step halo exchanges
         t_start = omp_get_wtime()
         istat = cudaDeviceSynchronize()
-        call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, 3)
-        call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-        call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
-        call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, 3)
+        call halo_exchange_3d_cuda(u_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(v_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_3d_cuda(h_d, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(eta_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(ubt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+        call halo_exchange_2d_cuda(vbt_d, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
         t_end = omp_get_wtime()
         t_halo = t_halo + (t_end - t_start)
 

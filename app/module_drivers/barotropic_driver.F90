@@ -1,7 +1,7 @@
 !> Standalone driver for the barotropic solver miniapp
 program barotropic_driver
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid
+    use mom6_types, only: ocean_grid_type, init_ocean_grid, end_ocean_grid, PI
     use mom6_barotropic, only: barotropic_CS, barotropic_init, btstep, barotropic_end
     implicit none
 
@@ -61,12 +61,12 @@ program barotropic_driver
     do j=G%jsd,G%jed
       do i=G%isd,G%ied
         ! Sea surface height anomaly (meters)
-        eta_in(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(ni, dp)*3.14159_dp*2.0_dp)* &
-                       cos(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)
+        eta_in(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(ni, dp)*PI*2.0_dp)* &
+                       cos(real(j - 1, dp)/real(nj, dp)*PI*2.0_dp)
         eta_init(i, j) = eta_in(i, j)
         ! Barotropic velocities (m/s)
-        ubt_in(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp)
-        vbt_in(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(ni, dp)*3.14159_dp)
+        ubt_in(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(nj, dp)*PI)
+        vbt_in(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(ni, dp)*PI)
       end do
     end do
 

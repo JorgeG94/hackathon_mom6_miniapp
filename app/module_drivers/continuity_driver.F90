@@ -2,7 +2,8 @@
 program continuity_driver
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid, BT_cont_type, alloc_BT_cont_type
+                          init_verticalGrid, end_ocean_grid, PI, &
+                          BT_cont_type, alloc_BT_cont_type
     use mom6_continuity, only: continuity_CS, continuity_init, continuity_PPM, continuity_end
     implicit none
 
@@ -62,10 +63,10 @@ program continuity_driver
     do k=1,nk
       do j=G%jsd,G%jed
         do i=G%isd,G%ied
-        hin(i, j, k) = 4000.0_dp/real(nk, dp) + 10.0_dp*sin(real(i - 1, dp)/real(ni, dp)*3.14159_dp)* &
-                       cos(real(j - 1, dp)/real(nj, dp)*3.14159_dp)*exp(-real(k, dp)/20.0_dp)
+        hin(i, j, k) = 4000.0_dp/real(nk, dp) + 10.0_dp*sin(real(i - 1, dp)/real(ni, dp)*PI)* &
+                       cos(real(j - 1, dp)/real(nj, dp)*PI)*exp(-real(k, dp)/20.0_dp)
         h(i, j, k) = hin(i, j, k)
-        u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*3.14159_dp*2.0_dp)*exp(-real(k, dp)/30.0_dp)
+        u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(nj, dp)*PI*2.0_dp)*exp(-real(k, dp)/30.0_dp)
         end do
       end do
     end do

@@ -20,8 +20,8 @@
 program rk2_omp_driver
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid, G_EARTH, BT_cont_type, &
-                          alloc_BT_cont_type, &
+                          init_verticalGrid, end_ocean_grid, G_EARTH, PI, &
+                          BT_cont_type, alloc_BT_cont_type, &
                           mech_forcing_type, vertvisc_type, &
                           init_mech_forcing, end_mech_forcing, &
                           init_vertvisc_visc, end_vertvisc_visc
@@ -549,15 +549,15 @@ contains
             do i=G%isd,G%ied
             ! Layer thickness with baroclinic structure
             h0(i, j, k) = total_depth/real(GV%ke, dp) + &
-                          10.0_dp*sin(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp)* &
-                          cos(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp)* &
+                          10.0_dp*sin(real(i - 1, dp)/real(G%ni, dp)*PI)* &
+                          cos(real(j - 1, dp)/real(G%nj, dp)*PI)* &
                           exp(-real(k, dp)/20.0_dp)
             h(i, j, k) = h0(i, j, k)
 
             ! Baroclinic velocities (surface-intensified)
-            u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp*2.0_dp)* &
+            u(i, j, k) = 0.1_dp*sin(real(j - 1, dp)/real(G%nj, dp)*PI*2.0_dp)* &
                          exp(-real(k, dp)/30.0_dp)
-            v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp*2.0_dp)* &
+            v(i, j, k) = 0.1_dp*cos(real(i - 1, dp)/real(G%ni, dp)*PI*2.0_dp)* &
                          exp(-real(k, dp)/30.0_dp)
             end do
           end do
@@ -566,10 +566,10 @@ contains
         ! Sea surface height and barotropic velocities
         do j=G%jsd,G%jed
           do i=G%isd,G%ied
-            eta(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp*2.0_dp)* &
-                        cos(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp*2.0_dp)
-            ubt(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(G%nj, dp)*3.14159_dp)
-            vbt(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(G%ni, dp)*3.14159_dp)
+            eta(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(G%ni, dp)*PI*2.0_dp)* &
+                        cos(real(j - 1, dp)/real(G%nj, dp)*PI*2.0_dp)
+            ubt(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(G%nj, dp)*PI)
+            vbt(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(G%ni, dp)*PI)
           end do
         end do
 
@@ -586,7 +586,7 @@ contains
         ! Sinusoidal zonal wind stress (~0.1 Pa)
         do j=G%jsd,G%jed
           do i=G%isd,G%ied
-            forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(G%nj, dp) * 3.14159_dp)
+            forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(G%nj, dp) * PI)
             forces%tauy(i, j) = 0.0_dp
           end do
         end do
