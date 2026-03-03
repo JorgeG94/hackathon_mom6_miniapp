@@ -35,8 +35,6 @@ program rk2_mpi_cuda_driver
     use mom6_hor_visc_cuda, only: hor_visc_CS_cuda, hor_visc_init_cuda, &
                                    hor_visc_cuda, hor_visc_end_cuda
 
-    ! OpenACC modules used ONLY for metric extraction
-    use mom6_barotropic, only: barotropic_CS, barotropic_init, barotropic_end
     implicit none
 
 
@@ -51,9 +49,6 @@ program rk2_mpi_cuda_driver
     type(barotropic_CS_cuda) :: bt_CS_cuda
     type(vert_visc_CS_cuda)  :: visc_CS
     type(hor_visc_CS_cuda)   :: hvisc_CS
-
-    ! OpenACC control structures (metric extraction only)
-    type(barotropic_CS) :: bt_CS_acc
 
     ! Host arrays
     real(dp), allocatable :: u_h(:,:,:), v_h(:,:,:)
@@ -186,16 +181,8 @@ program rk2_mpi_cuda_driver
                             G%dyCv, G%dxCu, G%dyCu, G%dxCv, G%IdxCu, G%IdyCv, &
                             SADOURNY75_ENERGY_CUDA)
 
-    ! Barotropic: OpenACC init for metric extraction, then CUDA init
-    call barotropic_init(bt_CS_acc, G, dt, bt_nsteps)
-    call barotropic_init_cuda(bt_CS_cuda, G%isd, G%ied, G%jsd, G%jed, &
-        G%isc, G%iec, G%jsc, G%jec, &
-        bt_nsteps, dt, bt_CS_acc%bebt, 0, &
-        bt_CS_acc%Datu, bt_CS_acc%Datv, &
-        bt_CS_acc%gtot_E, bt_CS_acc%gtot_W, bt_CS_acc%gtot_N, bt_CS_acc%gtot_S, &
-        bt_CS_acc%f_4_u, bt_CS_acc%f_4_v, bt_CS_acc%bt_rem_u, bt_CS_acc%bt_rem_v, &
-        G%IareaT, G%IdxCu, G%IdyCv)
-    call barotropic_end(bt_CS_acc)
+    ! Barotropic CUDA init (direct from grid metrics, no OpenACC)
+    call barotropic_init_cuda_from_grid(bt_CS_cuda, G, dt, bt_nsteps)
 
     ! Vertical viscosity CUDA init
     call vert_visc_init_cuda(visc_CS, G%isd, G%ied, G%jsd, G%jed, &
@@ -876,5 +863,71 @@ contains
         deallocate(dy2h, dx2h, dy2q, dx2q)
 
     end subroutine hor_visc_init_cuda_from_grid
+
+    !> Initialize CUDA barotropic directly from grid metrics (no OpenACC)
+    subroutine barotropic_init_cuda_from_grid(CS, G, dt, nstep)
+        type(barotropic_CS_cuda), intent(inout) :: CS
+        type(ocean_grid_type), intent(in) :: G
+        real(dp), intent(in) :: dt
+        integer, intent(in) :: nstep
+
+        real(dp), allocatable :: Datu(:,:), Datv(:,:)
+        real(dp), allocatable :: gtot_E(:,:), gtot_W(:,:), gtot_N(:,:), gtot_S(:,:)
+        real(dp), allocatable :: f_4_u(:,:,:), f_4_v(:,:,:)
+        real(dp), allocatable :: bt_rem_u(:,:), bt_rem_v(:,:)
+        real(dp) :: depth, bebt, f0
+        integer :: i, j, isd, ied, jsd, jed
+
+        isd = G%isd; ied = G%ied; jsd = G%jsd; jed = G%jed
+        depth = 4000.0_dp
+        bebt = 0.2_dp
+
+        ! Allocate temporary host arrays
+        allocate(Datu(isd:ied, jsd:jed), Datv(isd:ied, jsd:jed))
+        allocate(gtot_E(isd:ied, jsd:jed), gtot_W(isd:ied, jsd:jed))
+        allocate(gtot_N(isd:ied, jsd:jed), gtot_S(isd:ied, jsd:jed))
+        allocate(f_4_u(4, isd:ied, jsd:jed), f_4_v(4, isd:ied, jsd:jed))
+        allocate(bt_rem_u(isd:ied, jsd:jed), bt_rem_v(isd:ied, jsd:jed))
+
+        ! Compute metrics directly from grid
+        do j = jsd, jed
+            do i = isd, ied
+                Datu(i,j) = depth * G%dyCu(i,j)
+                Datv(i,j) = depth * G%dxCv(i,j)
+                gtot_E(i,j) = G_EARTH
+                gtot_W(i,j) = G_EARTH
+                gtot_N(i,j) = G_EARTH
+                gtot_S(i,j) = G_EARTH
+                bt_rem_u(i,j) = 0.999_dp
+                bt_rem_v(i,j) = 0.999_dp
+
+                ! Coriolis coefficients (f/4 at each corner)
+                f0 = G%CoriolisBu(i,j)
+                f_4_u(1,i,j) = 0.25_dp * f0
+                f_4_u(2,i,j) = 0.25_dp * f0
+                f_4_u(3,i,j) = 0.25_dp * f0
+                f_4_u(4,i,j) = 0.25_dp * f0
+                f_4_v(1,i,j) = 0.25_dp * f0
+                f_4_v(2,i,j) = 0.25_dp * f0
+                f_4_v(3,i,j) = 0.25_dp * f0
+                f_4_v(4,i,j) = 0.25_dp * f0
+            end do
+        end do
+
+        ! Call the CUDA init with computed metrics
+        call barotropic_init_cuda(CS, isd, ied, jsd, jed, &
+                                  G%isc, G%iec, G%jsc, G%jec, &
+                                  nstep, dt, bebt, 0, &
+                                  Datu, Datv, &
+                                  gtot_E, gtot_W, gtot_N, gtot_S, &
+                                  f_4_u, f_4_v, bt_rem_u, bt_rem_v, &
+                                  G%IareaT, G%IdxCu, G%IdyCv)
+
+        ! Free temporary host arrays
+        deallocate(Datu, Datv)
+        deallocate(gtot_E, gtot_W, gtot_N, gtot_S)
+        deallocate(f_4_u, f_4_v, bt_rem_u, bt_rem_v)
+
+    end subroutine barotropic_init_cuda_from_grid
 
 end program rk2_mpi_cuda_driver
