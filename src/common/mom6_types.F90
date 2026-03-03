@@ -81,7 +81,7 @@ module mom6_types
     real(dp), parameter :: RHO_0 = 1035.0_dp    ! Reference density [kg m-3]
     real(dp), parameter :: OMEGA = 7.2921e-5_dp  ! Earth rotation rate [s-1]
     real(dp), parameter :: PI = 3.14159265358979323846_dp  ! Pi
-    real(dp), parameter :: EARTH_RADIUS = EARTH_RADIUS       ! Earth radius [m]
+    real(dp), parameter :: EARTH_RADIUS = 6.371e6_dp! Earth radius [m]
     integer, parameter :: HALO_WIDTH = 7          ! Deep halo width matching MOM6
 
     !> Container for information about the summed layer transports
