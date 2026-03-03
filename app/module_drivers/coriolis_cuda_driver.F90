@@ -8,11 +8,13 @@ program coriolis_cuda_driver
                           init_verticalGrid, end_ocean_grid, PI
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end
     implicit none
 
     type(ocean_grid_type) :: G
     type(verticalGrid_type) :: GV
     type(coriolis_CS_cuda) :: CS_cuda
+    type(cuda_workspace_type) :: ws
 
     ! Host arrays
     real(dp), allocatable :: u(:,:,:), v(:,:,:), h(:,:,:)
@@ -119,17 +121,20 @@ program coriolis_cuda_driver
     ! Copy host → device
     u_d = u; v_d = v; h_d = h; uh_d = uh; vh_d = vh
 
+    ! Initialize workspace pool (9 3D slots for coriolis scratch)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 9, 0)
+
     ! Warmup
     print '(A)', ''
     print '(A)', 'Warming up CUDA kernel...'
-    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS_cuda)
+    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS_cuda, ws)
 
     ! Benchmark
     print '(A)', 'Benchmarking CUDA (explicit kernels)...'
     t_total = 0.0_dp
     do iter = 1, niter
         t_start = omp_get_wtime()
-        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS_cuda)
+        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, CS_cuda, ws)
         t_end = omp_get_wtime()
         t_total = t_total + (t_end - t_start)
     end do
@@ -156,6 +161,7 @@ program coriolis_cuda_driver
     print '(A)', '================================================================'
 
     ! Cleanup
+    call workspace_end(ws)
     call coriolis_end_cuda(CS_cuda)
     call end_ocean_grid(G)
     deallocate (u, v, h, uh, vh, CAu_h, CAv_h)

@@ -542,6 +542,7 @@ contains
 
         total_depth = 4000.0_dp
 
+        !$omp parallel do collapse(3) private(i,j,k)
         do k=1,GV%ke
           do j=G%jsd,G%jed
             do i=G%isd,G%ied
@@ -562,6 +563,7 @@ contains
         end do
 
         ! Sea surface height and barotropic velocities
+        !$omp parallel do collapse(2) private(i,j)
         do j=G%jsd,G%jed
           do i=G%isd,G%ied
             eta(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(G%ni, dp)*PI*2.0_dp)* &
@@ -582,6 +584,7 @@ contains
         integer :: i, j, k
 
         ! Sinusoidal zonal wind stress (~0.1 Pa)
+        !$omp parallel do collapse(2) private(i,j)
         do j=G%jsd,G%jed
           do i=G%isd,G%ied
             forces%taux(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(G%nj, dp) * PI)
@@ -591,6 +594,7 @@ contains
 
         ! Rayleigh drag in bottom layer only
         if (visc%has_Rayleigh) then
+            !$omp parallel do collapse(3) private(i,j,k)
             do k=1,GV%ke
               do j=G%jsd,G%jed
                 do i=G%isd,G%ied
@@ -599,6 +603,7 @@ contains
                 end do
               end do
             end do
+            !$omp parallel do collapse(2) private(i,j)
             do j=G%jsd,G%jed
               do i=G%isd,G%ied
                 visc%Ray_u(i, j, GV%ke) = 1.0e-4_dp

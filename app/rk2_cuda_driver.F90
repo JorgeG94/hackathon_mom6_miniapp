@@ -33,6 +33,7 @@ program rk2_cuda_driver
                                     vert_visc_cra_cuda, vert_visc_end_cuda
     use mom6_hor_visc_cuda, only: hor_visc_CS_cuda, hor_visc_init_cuda, &
                                    hor_visc_cuda, hor_visc_end_cuda
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end, workspace_copy_3d
 
     implicit none
 
@@ -48,6 +49,8 @@ program rk2_cuda_driver
     type(vert_visc_CS_cuda)  :: visc_CS
     type(hor_visc_CS_cuda)   :: hvisc_CS
 
+    ! Shared GPU workspace pool
+    type(cuda_workspace_type) :: ws
 
     ! Host 3D state arrays
     real(dp), allocatable :: u_h(:,:,:), v_h(:,:,:)
@@ -59,7 +62,7 @@ program rk2_cuda_driver
 
     ! Device 3D arrays
     real(dp), device, allocatable :: u_d(:,:,:), v_d(:,:,:)
-    real(dp), device, allocatable :: h_d(:,:,:), h0_d(:,:,:), htmp_d(:,:,:)
+    real(dp), device, allocatable :: h_d(:,:,:), h0_d(:,:,:)
     real(dp), device, allocatable :: uh_d(:,:,:), vh_d(:,:,:)
     real(dp), device, allocatable :: CAu_d(:,:,:), CAv_d(:,:,:)
     real(dp), device, allocatable :: up_d(:,:,:), vp_d(:,:,:)
@@ -74,11 +77,7 @@ program rk2_cuda_driver
     real(dp), device, allocatable :: dyCu_d(:,:), dxCv_d(:,:)
 
     ! Device arrays for full continuity solver
-    real(dp), device, allocatable :: por_face_areaU_d(:,:,:)
-    real(dp), device, allocatable :: visc_rem_u_d(:,:,:)
     real(dp), device, allocatable :: uhbt_cont_d(:,:)
-    real(dp), device, allocatable :: u_cor_d(:,:,:)
-    real(dp), device, allocatable :: du_cor_d(:,:)
     type(BT_cont_type_cuda) :: BT_cont_cuda
 
     ! Timing
@@ -183,7 +182,6 @@ program rk2_cuda_driver
     allocate (v_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (h_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (h0_d(G%isd:G%ied, G%jsd:G%jed, nk))
-    allocate (htmp_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (uh_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (vh_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (CAu_d(G%isd:G%ied, G%jsd:G%jed, nk))
@@ -207,15 +205,12 @@ program rk2_cuda_driver
     dyCu_d = G%dyCu
     dxCv_d = G%dxCv
     ! Full continuity solver device arrays
-    allocate (por_face_areaU_d(G%isd:G%ied, G%jsd:G%jed, nk))
-    allocate (visc_rem_u_d(G%isd:G%ied, G%jsd:G%jed, nk))
     allocate (uhbt_cont_d(G%isd:G%ied, G%jsd:G%jed))
-    allocate (u_cor_d(G%isd:G%ied, G%jsd:G%jed, nk))
-    allocate (du_cor_d(G%isd:G%ied, G%jsd:G%jed))
-    por_face_areaU_d = 1.0_dp
-    visc_rem_u_d = 1.0_dp
     uhbt_cont_d = 0.0_dp
     call alloc_BT_cont_type_cuda(BT_cont_cuda, G%isd, G%ied, G%jsd, G%jed, nk)
+
+    ! Initialize shared GPU workspace pool (9 3D + 6 2D slots)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 9, 6)
 
     ! --- Initialize host state ---
     call initialize_state(u_h, v_h, h_h, h0_h, eta_h, ubt_h, vbt_h, G, GV)
@@ -240,13 +235,12 @@ program rk2_cuda_driver
     call profiler_start("Warmup")
     print '(A)', 'Warming up CUDA kernels...'
     call compute_transports_cuda(u_d, v_d, h_d, uh_d, vh_d, dyCu_d, dxCv_d, G, GV)
-    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
-    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
-    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, visc_CS, taux_d, tauy_d)
+    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
+    call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
+    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, visc_CS, taux_d, tauy_d, ws)
     call btstep_cuda(eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d, bt_CS_cuda)
-    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS, &
-                             por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
-                             u_cor_d, BT_cont_cuda, du_cor_d)
+    call continuity_PPM_cuda(u_d, h0_d, h_d, uh_d, dt, cont_CS, ws, &
+                             uhbt_cont_d, BT_cont_cuda)
 
     ! Reset state after warmup
     u_d = u_h; v_d = v_h; h_d = h_h
@@ -285,7 +279,7 @@ program rk2_cuda_driver
         ! 2. Horizontal viscosity
         call profiler_start("HorVisc")
         t_start = omp_get_wtime()
-        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
+        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
         call profiler_stop("HorVisc")
@@ -293,7 +287,7 @@ program rk2_cuda_driver
         ! 3. Coriolis and momentum advection
         call profiler_start("Coriolis")
         t_start = omp_get_wtime()
-        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
+        call CorAdCalc_cuda(u_d, v_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
         call profiler_stop("Coriolis")
@@ -309,7 +303,7 @@ program rk2_cuda_driver
         ! 5. Vertical viscosity on predictor velocities
         call profiler_start("VertVisc")
         t_start = omp_get_wtime()
-        call vert_visc_cra_cuda(up_d, vp_d, h_d, dt, visc_CS, taux_d, tauy_d)
+        call vert_visc_cra_cuda(up_d, vp_d, h_d, dt, visc_CS, taux_d, tauy_d, ws)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
@@ -325,9 +319,8 @@ program rk2_cuda_driver
         ! 7. Continuity (update thicknesses)
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
-        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS, &
-                                 por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
-                                 u_cor_d, BT_cont_cuda, du_cor_d)
+        call continuity_PPM_cuda(up_d, h0_d, h_d, uh_d, dt, cont_CS, ws, &
+                                 uhbt_cont_d, BT_cont_cuda)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -344,7 +337,7 @@ program rk2_cuda_driver
         ! 9. Horizontal viscosity with updated state
         call profiler_start("HorVisc")
         t_start = omp_get_wtime()
-        call hor_visc_cuda(up_d, vp_d, h_d, diffu_d, diffv_d, hvisc_CS, nk)
+        call hor_visc_cuda(up_d, vp_d, h_d, diffu_d, diffv_d, hvisc_CS, nk, ws)
         t_end = omp_get_wtime()
         t_hor_visc = t_hor_visc + (t_end - t_start)
         call profiler_stop("HorVisc")
@@ -352,7 +345,7 @@ program rk2_cuda_driver
         ! 10. Coriolis with updated state
         call profiler_start("Coriolis")
         t_start = omp_get_wtime()
-        call CorAdCalc_cuda(up_d, vp_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS)
+        call CorAdCalc_cuda(up_d, vp_d, h_d, uh_d, vh_d, CAu_d, CAv_d, cor_CS, ws)
         t_end = omp_get_wtime()
         t_coriolis = t_coriolis + (t_end - t_start)
         call profiler_stop("Coriolis")
@@ -368,7 +361,7 @@ program rk2_cuda_driver
         ! 12. Vertical viscosity on corrector velocities
         call profiler_start("VertVisc")
         t_start = omp_get_wtime()
-        call vert_visc_cra_cuda(u_d, v_d, h_d, 0.5_dp*dt, visc_CS, taux_d, tauy_d)
+        call vert_visc_cra_cuda(u_d, v_d, h_d, 0.5_dp*dt, visc_CS, taux_d, tauy_d, ws)
         t_end = omp_get_wtime()
         t_vert_visc = t_vert_visc + (t_end - t_start)
         call profiler_stop("VertVisc")
@@ -384,10 +377,9 @@ program rk2_cuda_driver
         ! 14. Final continuity
         call profiler_start("Continuity")
         t_start = omp_get_wtime()
-        htmp_d = h_d
-        call continuity_PPM_cuda(u_d, htmp_d, h_d, uh_d, 0.5_dp*dt, cont_CS, &
-                                 por_face_areaU_d, uhbt_cont_d, visc_rem_u_d, &
-                                 u_cor_d, BT_cont_cuda, du_cor_d)
+        call workspace_copy_3d(ws%s3d(:,:,1:nk,4), h_d, G%ied-G%isd+1, G%jed-G%jsd+1, nk)
+        call continuity_PPM_cuda(u_d, ws%s3d(:,:,1:nk,4), h_d, uh_d, 0.5_dp*dt, cont_CS, ws, &
+                                 uhbt_cont_d, BT_cont_cuda)
         t_end = omp_get_wtime()
         t_continuity = t_continuity + (t_end - t_start)
         call profiler_stop("Continuity")
@@ -435,6 +427,7 @@ program rk2_cuda_driver
     ! CLEANUP
     !=========================================================================
     call profiler_start("Finalize")
+    call workspace_end(ws)
     call dealloc_BT_cont_type_cuda(BT_cont_cuda)
     call continuity_end_cuda(cont_CS)
     call coriolis_end_cuda(cor_CS)
@@ -445,12 +438,12 @@ program rk2_cuda_driver
 
     deallocate (u_h, v_h, h_h, h0_h, uh_h, vh_h)
     deallocate (eta_h, ubt_h, vbt_h)
-    deallocate (u_d, v_d, h_d, h0_d, htmp_d, uh_d, vh_d)
+    deallocate (u_d, v_d, h_d, h0_d, uh_d, vh_d)
     deallocate (CAu_d, CAv_d, up_d, vp_d, diffu_d, diffv_d)
     deallocate (eta_d, ubt_d, vbt_d, ubt_av_d, vbt_av_d, eta_av_d)
     deallocate (taux_d, tauy_d)
     deallocate (dyCu_d, dxCv_d)
-    deallocate (por_face_areaU_d, visc_rem_u_d, uhbt_cont_d, u_cor_d, du_cor_d)
+    deallocate (uhbt_cont_d)
     call profiler_stop("Finalize")
 
     call profiler_stop("Total")

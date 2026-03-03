@@ -17,7 +17,7 @@ endif()
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O2 -g -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
@@ -46,7 +46,7 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" ON)
 option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants" ON)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" ON)
-option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" OFF)
+option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
 option(MOM6_ENABLE_MODULE_DRIVERS "Build individual module drivers (continuity, coriolis, etc.)" OFF)
 
 if(MOM6_ENABLE_CUDA_KERNELS)

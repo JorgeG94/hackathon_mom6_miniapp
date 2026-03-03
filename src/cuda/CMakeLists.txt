@@ -1,5 +1,6 @@
 add_library(
   mom6_cuda_kernels STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/cuda_workspace.F90
   ${CMAKE_CURRENT_SOURCE_DIR}/mom6_coriolis_cuda.F90
   ${CMAKE_CURRENT_SOURCE_DIR}/mom6_vert_visc_cuda.F90
   ${CMAKE_CURRENT_SOURCE_DIR}/mom6_barotropic_cuda.F90

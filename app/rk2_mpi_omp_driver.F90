@@ -539,6 +539,7 @@ contains
         total_depth = 4000.0_dp
         halo = MD%halo
 
+        !$omp parallel do collapse(3) private(i,j,k,i_global,j_global)
         do k = 1, GV%ke
           do j = G%jsd, G%jed
             do i = G%isd, G%ied
@@ -559,6 +560,7 @@ contains
           end do
         end do
 
+        !$omp parallel do collapse(2) private(i,j,i_global,j_global)
         do j = G%jsd, G%jed
           do i = G%isd, G%ied
             i_global = i + MD%i_offset
@@ -583,6 +585,7 @@ contains
 
         integer :: i, j, k, j_global
 
+        !$omp parallel do collapse(2) private(i,j,j_global)
         do j = G%jsd, G%jed
           do i = G%isd, G%ied
             j_global = j + MD%j_offset
@@ -592,6 +595,7 @@ contains
         end do
 
         if (visc%has_Rayleigh) then
+            !$omp parallel do collapse(3) private(i,j,k)
             do k = 1, GV%ke
               do j = G%jsd, G%jed
                 do i = G%isd, G%ied
@@ -600,6 +604,7 @@ contains
                 end do
               end do
             end do
+            !$omp parallel do collapse(2) private(i,j)
             do j = G%jsd, G%jed
               do i = G%isd, G%ied
                 visc%Ray_u(i, j, GV%ke) = 1.0e-4_dp

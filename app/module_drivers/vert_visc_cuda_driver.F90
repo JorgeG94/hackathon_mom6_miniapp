@@ -7,11 +7,13 @@ program vert_visc_cuda_driver
                           init_verticalGrid, end_ocean_grid, PI
     use mom6_vert_visc_cuda, only: vert_visc_CS_cuda, vert_visc_init_cuda, &
                                     vert_visc_cra_cuda, vert_visc_end_cuda
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end
     implicit none
 
     type(ocean_grid_type)    :: G
     type(verticalGrid_type)  :: GV
     type(vert_visc_CS_cuda)  :: CS_cuda
+    type(cuda_workspace_type) :: ws
 
     ! Host state arrays
     real(dp), allocatable :: u_init(:,:,:), v_init(:,:,:), h(:,:,:)
@@ -116,6 +118,9 @@ program vert_visc_cuda_driver
 
     ! Copy thickness and surface stress to device (constant across iterations)
     h_d = h
+
+    ! Initialize workspace pool (4 3D + 2 2D slots for vert_visc scratch)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 4, 2)
     do j = G%jsd, G%jed
         do i = G%isd, G%ied
             taux_d(i, j) = 0.1_dp * sin(real(j - 1, dp) / real(nj, dp) * PI)
@@ -129,7 +134,7 @@ program vert_visc_cuda_driver
     print '(A)', ''
     print '(A)', 'Warming up CUDA variant...'
     u_d = u_init; v_d = v_init
-    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS_cuda, taux_d, tauy_d)
+    call vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS_cuda, taux_d, tauy_d, ws)
 
     ! ----------------------------------------------------------------
     ! Benchmark
@@ -141,7 +146,7 @@ program vert_visc_cuda_driver
         u_d = u_init; v_d = v_init
 
         t_start = omp_get_wtime()
-        call vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS_cuda, taux_d, tauy_d)
+        call vert_visc_cra_cuda(u_d, v_d, h_d, dt, CS_cuda, taux_d, tauy_d, ws)
         t_end = omp_get_wtime()
         t_total = t_total + (t_end - t_start)
     end do
@@ -187,6 +192,7 @@ program vert_visc_cuda_driver
     ! ----------------------------------------------------------------
     ! Cleanup
     ! ----------------------------------------------------------------
+    call workspace_end(ws)
     call vert_visc_end_cuda(CS_cuda)
     call end_ocean_grid(G)
     deallocate (u_init, v_init, h, u_h, v_h)

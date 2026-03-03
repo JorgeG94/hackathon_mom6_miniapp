@@ -16,6 +16,7 @@
 module mom6_hor_visc_cuda
     use cudafor
     use iso_fortran_env, only: dp => real64
+    use cuda_workspace, only: cuda_workspace_type
     implicit none
     private
 
@@ -50,10 +51,6 @@ module mom6_hor_visc_cuda
         real(dp), device, allocatable :: dx2h_d(:,:)
         real(dp), device, allocatable :: dy2q_d(:,:)
         real(dp), device, allocatable :: dx2q_d(:,:)
-
-        ! Device 3D work arrays (stress tensors only; intermediates stay in registers)
-        real(dp), device, allocatable :: str_xx_d(:,:,:)
-        real(dp), device, allocatable :: str_xy_d(:,:,:)
     end type hor_visc_CS_cuda
 
 contains
@@ -291,17 +288,13 @@ contains
         allocate(CS%dy2q_d(isd:ied, jsd:jed));       CS%dy2q_d = dy2q
         allocate(CS%dx2q_d(isd:ied, jsd:jed));       CS%dx2q_d = dx2q
 
-        ! Allocate 3D device work arrays (stress tensors only)
-        allocate(CS%str_xx_d(isd:ied, jsd:jed, nz))
-        allocate(CS%str_xy_d(isd:ied, jsd:jed, nz))
-
         CS%initialized = .true.
 
     end subroutine hor_visc_init_cuda
 
     !> Compute horizontal viscous accelerations on the GPU.
     !! Launches 2 fused 3D kernels covering all layers simultaneously.
-    subroutine hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS, nz, bx_in, by_in)
+    subroutine hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS, nz, ws, bx_in, by_in)
         type(hor_visc_CS_cuda), intent(inout) :: CS
         integer, intent(in) :: nz
         real(dp), device, intent(in)  :: u_d(CS%isd:CS%ied, CS%jsd:CS%jed, nz)
@@ -309,6 +302,7 @@ contains
         real(dp), device, intent(in)  :: h_d(CS%isd:CS%ied, CS%jsd:CS%jed, nz)
         real(dp), device, intent(out) :: diffu_d(CS%isd:CS%ied, CS%jsd:CS%jed, nz)
         real(dp), device, intent(out) :: diffv_d(CS%isd:CS%ied, CS%jsd:CS%jed, nz)
+        type(cuda_workspace_type), intent(inout) :: ws
         integer, intent(in), optional :: bx_in, by_in
 
         integer :: n1, n2, n3, is_l, ie_l, js_l, je_l, istat, bx, by
@@ -335,8 +329,9 @@ contains
         grid = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), n3)
 
         ! Kernel 1: Fused stress (vel_grad + strain + stress, all layers)
+        ! ws%s3d(:,:,1:nz,1) = str_xx, ws%s3d(:,:,1:nz,2) = str_xy
         call stress_kernel<<<grid, tBlock>>>( &
-            CS%str_xx_d, CS%str_xy_d, u_d, v_d, h_d, &
+            ws%s3d(:,:,1:nz,1), ws%s3d(:,:,1:nz,2), u_d, v_d, h_d, &
             CS%DY_dxT_d, CS%DX_dyT_d, CS%DY_dxBu_d, CS%DX_dyBu_d, &
             CS%IdyCu_d, CS%IdxCu_d, CS%IdyCv_d, CS%IdxCv_d, &
             CS%mask2dBu_d, CS%reduction_xx_d, CS%reduction_xy_d, &
@@ -346,7 +341,7 @@ contains
         ! Kernel 2: Stress divergence -> viscous acceleration (all layers)
         call divergence_kernel<<<grid, tBlock>>>( &
             diffu_d, diffv_d, &
-            CS%str_xx_d, CS%str_xy_d, h_d, &
+            ws%s3d(:,:,1:nz,1), ws%s3d(:,:,1:nz,2), h_d, &
             CS%mask2dT_d, &
             CS%IdyCu_d, CS%IdxCu_d, CS%IdyCv_d, CS%IdxCv_d, &
             CS%IareaCu_d, CS%IareaCv_d, &
@@ -384,10 +379,6 @@ contains
         if (allocated(CS%dx2h_d)) deallocate(CS%dx2h_d)
         if (allocated(CS%dy2q_d)) deallocate(CS%dy2q_d)
         if (allocated(CS%dx2q_d)) deallocate(CS%dx2q_d)
-
-        ! Deallocate device work arrays
-        if (allocated(CS%str_xx_d)) deallocate(CS%str_xx_d)
-        if (allocated(CS%str_xy_d)) deallocate(CS%str_xy_d)
 
         CS%initialized = .false.
 

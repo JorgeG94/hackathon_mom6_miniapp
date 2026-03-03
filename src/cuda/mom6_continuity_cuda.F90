@@ -10,6 +10,7 @@
 module mom6_continuity_cuda
     use cudafor
     use iso_fortran_env, only: dp => real64
+    use cuda_workspace, only: cuda_workspace_type
     implicit none
     private
 
@@ -51,23 +52,6 @@ module mom6_continuity_cuda
         real(dp), device, allocatable :: areaT_d(:,:)
         real(dp), device, allocatable :: dxCu_d(:,:)
         real(dp), device, allocatable :: mask2dCu_d(:,:)
-
-        !> Device 3D work arrays for PPM edge values
-        real(dp), device, allocatable :: h_W(:,:,:)
-        real(dp), device, allocatable :: h_E(:,:,:)
-
-        !> Device work arrays for full solver
-        real(dp), device, allocatable :: duhdu(:,:,:)
-        real(dp), device, allocatable :: du(:,:)
-        real(dp), device, allocatable :: du_max_CFL(:,:)
-        real(dp), device, allocatable :: du_min_CFL(:,:)
-        real(dp), device, allocatable :: duhdu_tot_0(:,:)
-        real(dp), device, allocatable :: uh_tot_0(:,:)
-        real(dp), device, allocatable :: visc_rem_max_arr(:,:)
-
-        !> Default device arrays (for when optional args are absent)
-        real(dp), device, allocatable :: por_face_areaU_def(:,:,:)
-        real(dp), device, allocatable :: visc_rem_u_def(:,:,:)
     end type continuity_CS_cuda
 
     !> CUDA-specific BT_cont type with device arrays
@@ -210,7 +194,7 @@ contains
             uh, duhdu, u, h_in, h_W, h_E, dy_Cu, IdxT, IareaT, &
             por_face_areaU, visc_rem_u, &
             n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-            vol_CFL_flag, use_visc_rem_flag)
+            vol_CFL_flag, use_visc_rem_flag, use_por_face_flag)
         integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
         real(dp), intent(out) :: uh(n1, n2, n3), duhdu(n1, n2, n3)
         real(dp), intent(in)  :: u(n1, n2, n3), h_in(n1, n2, n3)
@@ -218,10 +202,10 @@ contains
         real(dp), intent(in)  :: por_face_areaU(n1, n2, n3), visc_rem_u(n1, n2, n3)
         real(dp), intent(in)  :: dy_Cu(n1, n2), IdxT(n1, n2), IareaT(n1, n2)
         real(dp), value, intent(in) :: dt
-        integer, value, intent(in) :: vol_CFL_flag, use_visc_rem_flag
+        integer, value, intent(in) :: vol_CFL_flag, use_visc_rem_flag, use_por_face_flag
 
         integer :: i, j, k
-        real(dp) :: CFL, curv_3, h_marg, visc_rem_val
+        real(dp) :: CFL, curv_3, h_marg, visc_rem_val, dy_pfa
 
         i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
         j = (blockIdx%y - 1) * blockDim%y + threadIdx%y
@@ -237,6 +221,12 @@ contains
             visc_rem_val = 1.0_dp
         end if
 
+        if (use_por_face_flag == 1) then
+            dy_pfa = dy_Cu(i, j) * por_face_areaU(i, j, k)
+        else
+            dy_pfa = dy_Cu(i, j)
+        end if
+
         if (u(i, j, k) > 0.0_dp) then
             if (vol_CFL_flag == 1) then
                 CFL = (u(i, j, k) * dt) * (dy_Cu(i, j) * IareaT(i, j))
@@ -244,7 +234,7 @@ contains
                 CFL = u(i, j, k) * dt * IdxT(i, j)
             end if
             curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-            uh(i, j, k) = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u(i, j, k) * &
+            uh(i, j, k) = dy_pfa * u(i, j, k) * &
                 (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                  curv_3 * (CFL - 1.5_dp)))
             h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + &
@@ -256,7 +246,7 @@ contains
                 CFL = -u(i, j, k) * dt * IdxT(i + 1, j)
             end if
             curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-            uh(i, j, k) = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u(i, j, k) * &
+            uh(i, j, k) = dy_pfa * u(i, j, k) * &
                 (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                  curv_3 * (CFL - 1.5_dp)))
             h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
@@ -266,7 +256,7 @@ contains
             h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
         end if
 
-        duhdu(i, j, k) = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+        duhdu(i, j, k) = dy_pfa * h_marg * visc_rem_val
 
     end subroutine zonal_flux_layer_3d_kernel
 
@@ -474,7 +464,8 @@ contains
             IareaT, dy_Cu, IdxT, &
             du_max_CFL_in, du_min_CFL_in, uh_tot_0_in, duhdu_tot_0_in, &
             n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-            tol_eta_base, tol_vel_val, vol_CFL_flag, use_visc_rem_flag, better_iter_flag)
+            tol_eta_base, tol_vel_val, vol_CFL_flag, use_visc_rem_flag, better_iter_flag, &
+            use_por_face_flag)
         integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
         real(dp), intent(inout) :: uh(n1, n2, n3)
         real(dp), intent(out)   :: du_out(n1, n2)
@@ -487,13 +478,14 @@ contains
         real(dp), intent(in)    :: uh_tot_0_in(n1, n2), duhdu_tot_0_in(n1, n2)
         real(dp), value, intent(in) :: dt, tol_eta_base, tol_vel_val
         integer, value, intent(in) :: vol_CFL_flag, use_visc_rem_flag, better_iter_flag
+        integer, value, intent(in) :: use_por_face_flag
 
         integer :: i, j, k, itt
         integer, parameter :: max_itts = 20
         real(dp) :: du_val, du_prev, ddu, uh_err_val, uh_err_best_val
         real(dp) :: duhdu_tot_val, du_max_val, du_min_val
         real(dp) :: tol_eta, tol_vel
-        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val
+        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, visc_rem_val, dy_pfa
         logical :: do_more
 
         i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
@@ -566,6 +558,11 @@ contains
                 else
                     visc_rem_val = 1.0_dp
                 end if
+                if (use_por_face_flag == 1) then
+                    dy_pfa = dy_Cu(i, j) * por_face_areaU(i, j, k)
+                else
+                    dy_pfa = dy_Cu(i, j)
+                end if
                 u_adj = u(i, j, k) + du_val * visc_rem_val
 
                 if (u_adj > 0.0_dp) then
@@ -575,7 +572,7 @@ contains
                         CFL = u_adj * dt * IdxT(i, j)
                     end if
                     curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-                    uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                    uh_k = dy_pfa * u_adj * &
                         (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                          curv_3 * (CFL - 1.5_dp)))
                     h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + &
@@ -587,7 +584,7 @@ contains
                         CFL = -u_adj * dt * IdxT(i + 1, j)
                     end if
                     curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-                    uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                    uh_k = dy_pfa * u_adj * &
                         (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                          curv_3 * (CFL - 1.5_dp)))
                     h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
@@ -596,7 +593,7 @@ contains
                     uh_k = 0.0_dp
                     h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
                 end if
-                duhdu_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+                duhdu_k = dy_pfa * h_marg * visc_rem_val
                 uh_err_val = uh_err_val + uh_k
                 duhdu_tot_val = duhdu_tot_val + duhdu_k
             end do
@@ -610,6 +607,11 @@ contains
             else
                 visc_rem_val = 1.0_dp
             end if
+            if (use_por_face_flag == 1) then
+                dy_pfa = dy_Cu(i, j) * por_face_areaU(i, j, k)
+            else
+                dy_pfa = dy_Cu(i, j)
+            end if
             u_adj = u(i, j, k) + du_val * visc_rem_val
 
             if (u_adj > 0.0_dp) then
@@ -619,7 +621,7 @@ contains
                     CFL = u_adj * dt * IdxT(i, j)
                 end if
                 curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-                uh(i, j, k) = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh(i, j, k) = dy_pfa * u_adj * &
                     (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
             elseif (u_adj < 0.0_dp) then
@@ -629,7 +631,7 @@ contains
                     CFL = -u_adj * dt * IdxT(i + 1, j)
                 end if
                 curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-                uh(i, j, k) = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh(i, j, k) = dy_pfa * u_adj * &
                     (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
             else
@@ -649,7 +651,8 @@ contains
             IareaT, dy_Cu, IdxT, dxCu, visc_rem_max_in, &
             du_max_CFL_in, du_min_CFL_in, uh_tot_0_in, duhdu_tot_0_in, &
             n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-            tol_eta_base, tol_vel_val, vol_CFL_flag, use_visc_rem_flag, better_iter_flag)
+            tol_eta_base, tol_vel_val, vol_CFL_flag, use_visc_rem_flag, better_iter_flag, &
+            use_por_face_flag)
         integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
         real(dp), intent(out)   :: FA_u_W0(n1, n2), FA_u_WW(n1, n2), uBT_WW(n1, n2)
         real(dp), intent(out)   :: FA_u_E0(n1, n2), FA_u_EE(n1, n2), uBT_EE(n1, n2)
@@ -662,6 +665,7 @@ contains
         real(dp), intent(in)    :: uh_tot_0_in(n1, n2), duhdu_tot_0_in(n1, n2)
         real(dp), value, intent(in) :: dt, tol_eta_base, tol_vel_val
         integer, value, intent(in) :: vol_CFL_flag, use_visc_rem_flag, better_iter_flag
+        integer, value, intent(in) :: use_por_face_flag
 
         integer :: i, j, k, itt
         integer, parameter :: max_itts = 20
@@ -670,7 +674,7 @@ contains
         real(dp) :: tol_eta, tol_vel
         real(dp) :: duL_val, duR_val, du_CFL_val, Idt
         real(dp) :: visc_rem_lim, visc_rem_val
-        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k
+        real(dp) :: CFL, curv_3, h_marg, u_adj, uh_k, duhdu_k, dy_pfa
         real(dp) :: FAmt_L_val, FAmt_R_val, FAmt_0_val
         real(dp) :: uhtot_L_val, uhtot_R_val
         real(dp) :: FA_0, FA_avg
@@ -750,6 +754,11 @@ contains
                 else
                     visc_rem_val = 1.0_dp
                 end if
+                if (use_por_face_flag == 1) then
+                    dy_pfa = dy_Cu(i, j) * por_face_areaU(i, j, k)
+                else
+                    dy_pfa = dy_Cu(i, j)
+                end if
                 u_adj = u(i, j, k) + du_val * visc_rem_val
                 if (u_adj > 0.0_dp) then
                     if (vol_CFL_flag == 1) then
@@ -758,7 +767,7 @@ contains
                         CFL = u_adj * dt * IdxT(i, j)
                     end if
                     curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-                    uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                    uh_k = dy_pfa * u_adj * &
                         (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                          curv_3 * (CFL - 1.5_dp)))
                     h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + &
@@ -770,7 +779,7 @@ contains
                         CFL = -u_adj * dt * IdxT(i + 1, j)
                     end if
                     curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-                    uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                    uh_k = dy_pfa * u_adj * &
                         (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                          curv_3 * (CFL - 1.5_dp)))
                     h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
@@ -779,7 +788,7 @@ contains
                     uh_k = 0.0_dp
                     h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
                 end if
-                duhdu_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+                duhdu_k = dy_pfa * h_marg * visc_rem_val
                 uh_err_val = uh_err_val + uh_k
                 duhdu_tot_val = duhdu_tot_val + duhdu_k
             end do
@@ -819,6 +828,11 @@ contains
             else
                 visc_rem_val = 1.0_dp
             end if
+            if (use_por_face_flag == 1) then
+                dy_pfa = dy_Cu(i, j) * por_face_areaU(i, j, k)
+            else
+                dy_pfa = dy_Cu(i, j)
+            end if
 
             ! u_0 test velocity
             u_adj = u(i, j, k) + du0_val * visc_rem_val
@@ -843,7 +857,7 @@ contains
             else
                 h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
             end if
-            FAmt_0_val = FAmt_0_val + (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+            FAmt_0_val = FAmt_0_val + dy_pfa * h_marg * visc_rem_val
 
             ! u_L test velocity (westerly, positive)
             u_adj = u(i, j, k) + duL_val * visc_rem_val
@@ -854,7 +868,7 @@ contains
                     CFL = u_adj * dt * IdxT(i, j)
                 end if
                 curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-                uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh_k = dy_pfa * u_adj * &
                     (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
                 h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + &
@@ -866,7 +880,7 @@ contains
                     CFL = -u_adj * dt * IdxT(i + 1, j)
                 end if
                 curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-                uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh_k = dy_pfa * u_adj * &
                     (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
                 h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
@@ -875,7 +889,7 @@ contains
                 uh_k = 0.0_dp
                 h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
             end if
-            FAmt_L_val = FAmt_L_val + (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+            FAmt_L_val = FAmt_L_val + dy_pfa * h_marg * visc_rem_val
             uhtot_L_val = uhtot_L_val + uh_k
 
             ! u_R test velocity (easterly, negative)
@@ -887,7 +901,7 @@ contains
                     CFL = u_adj * dt * IdxT(i, j)
                 end if
                 curv_3 = (h_W(i, j, k) + h_E(i, j, k)) - 2.0_dp * h_in(i, j, k)
-                uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh_k = dy_pfa * u_adj * &
                     (h_E(i, j, k) + CFL * (0.5_dp * (h_W(i, j, k) - h_E(i, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
                 h_marg = h_E(i, j, k) + CFL * ((h_W(i, j, k) - h_E(i, j, k)) + &
@@ -899,7 +913,7 @@ contains
                     CFL = -u_adj * dt * IdxT(i + 1, j)
                 end if
                 curv_3 = (h_W(i + 1, j, k) + h_E(i + 1, j, k)) - 2.0_dp * h_in(i + 1, j, k)
-                uh_k = (dy_Cu(i, j) * por_face_areaU(i, j, k)) * u_adj * &
+                uh_k = dy_pfa * u_adj * &
                     (h_W(i + 1, j, k) + CFL * (0.5_dp * (h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
                      curv_3 * (CFL - 1.5_dp)))
                 h_marg = h_W(i + 1, j, k) + CFL * ((h_E(i + 1, j, k) - h_W(i + 1, j, k)) + &
@@ -908,7 +922,7 @@ contains
                 uh_k = 0.0_dp
                 h_marg = 0.5_dp * (h_W(i + 1, j, k) + h_E(i, j, k))
             end if
-            FAmt_R_val = FAmt_R_val + (dy_Cu(i, j) * por_face_areaU(i, j, k)) * h_marg * visc_rem_val
+            FAmt_R_val = FAmt_R_val + dy_pfa * h_marg * visc_rem_val
             uhtot_R_val = uhtot_R_val + uh_k
         end do ! k
 
@@ -960,7 +974,7 @@ contains
             por_face_areaU, visc_rem_u, &
             IareaT, IdxT, dy_Cu, &
             n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-            vol_CFL_flag, marginal_flag, has_visc_rem_flag)
+            vol_CFL_flag, marginal_flag, has_visc_rem_flag, use_por_face_flag)
         integer, value, intent(in) :: n1, n2, n3, is_l, ie_l, js_l, je_l
         real(dp), intent(out) :: h_u(n1, n2, n3)
         real(dp), intent(in)  :: u(n1, n2, n3), h(n1, n2, n3)
@@ -968,7 +982,7 @@ contains
         real(dp), intent(in)  :: por_face_areaU(n1, n2, n3), visc_rem_u(n1, n2, n3)
         real(dp), intent(in)  :: IareaT(n1, n2), IdxT(n1, n2), dy_Cu(n1, n2)
         real(dp), value, intent(in) :: dt
-        integer, value, intent(in) :: vol_CFL_flag, marginal_flag, has_visc_rem_flag
+        integer, value, intent(in) :: vol_CFL_flag, marginal_flag, has_visc_rem_flag, use_por_face_flag
 
         integer :: i, j, k
         real(dp) :: CFL, curv_3, h_avg, h_marg
@@ -1015,9 +1029,11 @@ contains
         end if
 
         ! Scale by visc_rem and por_face_areaU
-        if (has_visc_rem_flag == 1) then
+        if (has_visc_rem_flag == 1 .and. use_por_face_flag == 1) then
             h_u(i, j, k) = h_u(i, j, k) * (visc_rem_u(i, j, k) * por_face_areaU(i, j, k))
-        else
+        elseif (has_visc_rem_flag == 1) then
+            h_u(i, j, k) = h_u(i, j, k) * visc_rem_u(i, j, k)
+        elseif (use_por_face_flag == 1) then
             h_u(i, j, k) = h_u(i, j, k) * por_face_areaU(i, j, k)
         end if
 
@@ -1091,10 +1107,6 @@ contains
         CS%use_visc_rem_max = .true.
         CS%marginal_faces = .true.
 
-        ! Allocate 3D device work arrays for PPM edge values
-        allocate(CS%h_W(isd:ied, jsd:jed, nk))
-        allocate(CS%h_E(isd:ied, jsd:jed, nk))
-
         ! Allocate 2D device grid metrics (existing) and copy from host
         allocate(CS%IareaT_d(isd:ied, jsd:jed));  CS%IareaT_d = IareaT
         allocate(CS%IdxT_d(isd:ied, jsd:jed));    CS%IdxT_d = IdxT
@@ -1115,49 +1127,36 @@ contains
             allocate(CS%mask2dCu_d(isd:ied, jsd:jed)); CS%mask2dCu_d = mask2dCu
         end if
 
-        ! Allocate work arrays for full solver
-        allocate(CS%duhdu(isd:ied, jsd:jed, nk))
-        allocate(CS%du(isd:ied, jsd:jed))
-        allocate(CS%du_max_CFL(isd:ied, jsd:jed))
-        allocate(CS%du_min_CFL(isd:ied, jsd:jed))
-        allocate(CS%duhdu_tot_0(isd:ied, jsd:jed))
-        allocate(CS%uh_tot_0(isd:ied, jsd:jed))
-        allocate(CS%visc_rem_max_arr(isd:ied, jsd:jed))
-
-        ! Allocate default arrays (por_face = 1.0, visc_rem = 1.0)
-        allocate(CS%por_face_areaU_def(isd:ied, jsd:jed, nk))
-        allocate(CS%visc_rem_u_def(isd:ied, jsd:jed, nk))
-        CS%por_face_areaU_def = 1.0_dp
-        CS%visc_rem_u_def = 1.0_dp
-
         CS%initialized = .true.
 
     end subroutine continuity_init_cuda
 
     !> Run the full PPM continuity solver on the GPU.
     !! When optional args are absent, falls back to the basic 3-kernel path.
-    subroutine continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS, &
-            por_face_areaU_d, uhbt_d, visc_rem_u_d, u_cor_d, BT_cont, du_cor_d, bx_in, by_in)
+    subroutine continuity_PPM_cuda(u_d, hin_d, h_d, uh_d, dt, CS, ws, &
+            uhbt_d, BT_cont, bx_in, by_in)
         type(continuity_CS_cuda), intent(inout) :: CS
+        type(cuda_workspace_type), intent(inout) :: ws
         real(dp), device, intent(in)    :: u_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in)    :: hin_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(out)   :: h_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(inout) :: uh_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), intent(in)            :: dt
-        real(dp), device, intent(in), optional    :: por_face_areaU_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         real(dp), device, intent(in), optional    :: uhbt_d(CS%isd:CS%ied, CS%jsd:CS%jed)
-        real(dp), device, intent(in), optional    :: visc_rem_u_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
-        real(dp), device, intent(out), optional   :: u_cor_d(CS%isd:CS%ied, CS%jsd:CS%jed, CS%nz)
         type(BT_cont_type_cuda), intent(inout), optional :: BT_cont
-        real(dp), device, intent(out), optional   :: du_cor_d(CS%isd:CS%ied, CS%jsd:CS%jed)
         integer, intent(in), optional :: bx_in, by_in
 
         integer :: n1, n2, n3, is_l, ie_l, js_l, je_l, istat, bx, by
         integer :: mono_flag, upwind_flag, simple_flag
-        integer :: vol_CFL_flag, use_visc_rem_flag, aggress_flag, better_flag, marginal_flag
+        integer :: vol_CFL_flag, aggress_flag, better_flag, marginal_flag
         real(dp) :: h_min, CFL_dt, I_dt
-        logical :: has_full_args, set_BT_cont
+        logical :: set_BT_cont
         type(dim3) :: grid3, grid2, tBlock
+
+        ! Workspace slot aliases (documented for clarity):
+        ! 3D slot 1 = h_W,  slot 2 = h_E,  slot 3 = duhdu
+        ! 2D slot 1 = du,   slot 2 = du_max_CFL,  slot 3 = du_min_CFL
+        ! 2D slot 4 = duhdu_tot_0,  slot 5 = uh_tot_0,  slot 6 = visc_rem_max_arr
 
         ! Configurable block dimensions
         bx = 32; by = 4
@@ -1181,14 +1180,12 @@ contains
         upwind_flag = 0; if (CS%upwind_1st) upwind_flag = 1
         simple_flag = 0; if (CS%simple_2nd) simple_flag = 1
 
-        ! Solver flags
+        ! Solver flags — visc_rem and por_face_areaU are always 1.0, use flags=0
         vol_CFL_flag = 0; if (CS%vol_CFL) vol_CFL_flag = 1
-        use_visc_rem_flag = 0; if (present(visc_rem_u_d)) use_visc_rem_flag = 1
         aggress_flag = 0; if (CS%aggress_adjust) aggress_flag = 1
         better_flag = 0; if (CS%better_iter) better_flag = 1
         marginal_flag = 0; if (CS%marginal_faces) marginal_flag = 1
 
-        has_full_args = present(por_face_areaU_d)
         set_BT_cont = .false.
         if (present(BT_cont)) set_BT_cont = .true.
 
@@ -1202,144 +1199,76 @@ contains
         grid2 = dim3(ceiling(real(n1) / real(bx)), ceiling(real(n2) / real(by)), 1)
 
         ! --- Kernel 1: PPM reconstruction ---
+        ! h_W → slot 1, h_E → slot 2
         call ppm_reconstruction_3d_kernel<<<grid3, tBlock>>>( &
-            CS%h_W, CS%h_E, hin_d, CS%mask2dT_d, &
+            ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), hin_d, CS%mask2dT_d, &
             n1, n2, n3, is_l, ie_l, js_l, je_l, h_min, mono_flag, &
             upwind_flag, simple_flag)
 
         ! --- Kernel 2: Zonal flux + duhdu ---
-        if (has_full_args) then
-            call zonal_flux_layer_3d_kernel<<<grid3, tBlock>>>( &
-                uh_d, CS%duhdu, u_d, hin_d, CS%h_W, CS%h_E, CS%dy_Cu_d, CS%IdxT_d, CS%IareaT_d, &
-                por_face_areaU_d, visc_rem_u_d, &
-                n1, n2, n3, is_l, ie_l, js_l, je_l, dt, vol_CFL_flag, use_visc_rem_flag)
-        else
-            call zonal_flux_layer_3d_kernel<<<grid3, tBlock>>>( &
-                uh_d, CS%duhdu, u_d, hin_d, CS%h_W, CS%h_E, CS%dy_Cu_d, CS%IdxT_d, CS%IareaT_d, &
-                CS%por_face_areaU_def, CS%visc_rem_u_def, &
-                n1, n2, n3, is_l, ie_l, js_l, je_l, dt, 0, 0)
-        end if
+        ! duhdu → slot 3; por_face_areaU/visc_rem_u → dummy (flags=0, not read)
+        call zonal_flux_layer_3d_kernel<<<grid3, tBlock>>>( &
+            uh_d, ws%s3d(:,:,1:n3,3), u_d, hin_d, &
+            ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+            CS%dy_Cu_d, CS%IdxT_d, CS%IareaT_d, &
+            ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,1), &
+            n1, n2, n3, is_l, ie_l, js_l, je_l, dt, vol_CFL_flag, 0, 0)
 
         ! --- Steps 3-5: Adjustment kernels (only when uhbt or BT_cont present) ---
         if (present(uhbt_d) .or. set_BT_cont) then
 
-            ! 3a. visc_rem_max
-            if (has_full_args) then
-                call visc_rem_max_kernel<<<grid2, tBlock>>>( &
-                    CS%visc_rem_max_arr, visc_rem_u_d, &
-                    n1, n2, n3, is_l, ie_l, js_l, je_l, &
-                    merge(1, 0, use_visc_rem_flag == 1 .and. CS%use_visc_rem_max))
-            else
-                call visc_rem_max_kernel<<<grid2, tBlock>>>( &
-                    CS%visc_rem_max_arr, CS%visc_rem_u_def, &
-                    n1, n2, n3, is_l, ie_l, js_l, je_l, 0)
-            end if
+            ! 3a. visc_rem_max — flag=0 writes 1.0 (no visc_rem)
+            call visc_rem_max_kernel<<<grid2, tBlock>>>( &
+                ws%s2d(:,:,6), ws%s3d(:,:,1:n3,1), &
+                n1, n2, n3, is_l, ie_l, js_l, je_l, 0)
 
             ! 3b. uh_tot_0 + duhdu_tot_0
             call uh_duhdu_tot_kernel<<<grid2, tBlock>>>( &
-                CS%uh_tot_0, CS%duhdu_tot_0, uh_d, CS%duhdu, &
+                ws%s2d(:,:,5), ws%s2d(:,:,4), uh_d, ws%s3d(:,:,1:n3,3), &
                 n1, n2, n3, is_l, ie_l, js_l, je_l)
 
             ! 3c. CFL limits
-            if (has_full_args) then
-                call zonal_CFL_limits_kernel<<<grid2, tBlock>>>( &
-                    CS%du_max_CFL, CS%du_min_CFL, u_d, visc_rem_u_d, CS%visc_rem_max_arr, &
-                    CS%dxT_d, CS%areaT_d, CS%dy_Cu_d, CS%mask2dCu_d, &
-                    n1, n2, n3, is_l, ie_l, js_l, je_l, &
-                    CFL_dt, I_dt, vol_CFL_flag, use_visc_rem_flag, aggress_flag)
-            else
-                call zonal_CFL_limits_kernel<<<grid2, tBlock>>>( &
-                    CS%du_max_CFL, CS%du_min_CFL, u_d, CS%visc_rem_u_def, CS%visc_rem_max_arr, &
-                    CS%dxT_d, CS%areaT_d, CS%dy_Cu_d, CS%mask2dCu_d, &
-                    n1, n2, n3, is_l, ie_l, js_l, je_l, &
-                    CFL_dt, I_dt, 0, 0, aggress_flag)
-            end if
+            call zonal_CFL_limits_kernel<<<grid2, tBlock>>>( &
+                ws%s2d(:,:,2), ws%s2d(:,:,3), u_d, &
+                ws%s3d(:,:,1:n3,1), ws%s2d(:,:,6), &
+                CS%dxT_d, CS%areaT_d, CS%dy_Cu_d, CS%mask2dCu_d, &
+                n1, n2, n3, is_l, ie_l, js_l, je_l, &
+                CFL_dt, I_dt, vol_CFL_flag, 0, aggress_flag)
 
             ! 4. Newton flux adjustment (when uhbt present)
             if (present(uhbt_d)) then
-                if (has_full_args) then
-                    call zonal_flux_adjust_kernel<<<grid2, tBlock>>>( &
-                        uh_d, CS%du, u_d, hin_d, CS%h_W, CS%h_E, uhbt_d, &
-                        visc_rem_u_d, por_face_areaU_d, &
-                        CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, &
-                        CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, &
-                        n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                        CS%tol_eta, CS%tol_vel, vol_CFL_flag, use_visc_rem_flag, better_flag)
-                else
-                    call zonal_flux_adjust_kernel<<<grid2, tBlock>>>( &
-                        uh_d, CS%du, u_d, hin_d, CS%h_W, CS%h_E, uhbt_d, &
-                        CS%visc_rem_u_def, CS%por_face_areaU_def, &
-                        CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, &
-                        CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, &
-                        n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                        CS%tol_eta, CS%tol_vel, 0, 0, better_flag)
-                end if
-
-                ! u_cor kernel
-                if (present(u_cor_d)) then
-                    if (has_full_args) then
-                        call u_cor_kernel<<<grid3, tBlock>>>( &
-                            u_cor_d, u_d, CS%du, visc_rem_u_d, &
-                            n1, n2, n3, is_l, ie_l, js_l, je_l, use_visc_rem_flag)
-                    else
-                        call u_cor_kernel<<<grid3, tBlock>>>( &
-                            u_cor_d, u_d, CS%du, CS%visc_rem_u_def, &
-                            n1, n2, n3, is_l, ie_l, js_l, je_l, 0)
-                    end if
-                end if
-
-                ! du_cor: device-to-device copy
-                if (present(du_cor_d)) then
-                    du_cor_d = CS%du
-                end if
+                call zonal_flux_adjust_kernel<<<grid2, tBlock>>>( &
+                    uh_d, ws%s2d(:,:,1), u_d, hin_d, &
+                    ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), uhbt_d, &
+                    ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,1), &
+                    CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, &
+                    ws%s2d(:,:,2), ws%s2d(:,:,3), ws%s2d(:,:,5), ws%s2d(:,:,4), &
+                    n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
+                    CS%tol_eta, CS%tol_vel, vol_CFL_flag, 0, better_flag, 0)
+                ! u_cor and du_cor: dead outputs, removed
             end if
 
             ! 5. BT_cont computation
             if (set_BT_cont) then
-                if (has_full_args) then
-                    call set_zonal_BT_cont_kernel<<<grid2, tBlock>>>( &
-                        BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW, &
-                        BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE, &
-                        u_d, hin_d, CS%h_W, CS%h_E, visc_rem_u_d, por_face_areaU_d, &
-                        CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, CS%dxCu_d, CS%visc_rem_max_arr, &
-                        CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, &
-                        n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                        CS%tol_eta, CS%tol_vel, vol_CFL_flag, use_visc_rem_flag, better_flag)
-                else
-                    call set_zonal_BT_cont_kernel<<<grid2, tBlock>>>( &
-                        BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW, &
-                        BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE, &
-                        u_d, hin_d, CS%h_W, CS%h_E, CS%visc_rem_u_def, CS%por_face_areaU_def, &
-                        CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, CS%dxCu_d, CS%visc_rem_max_arr, &
-                        CS%du_max_CFL, CS%du_min_CFL, CS%uh_tot_0, CS%duhdu_tot_0, &
-                        n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                        CS%tol_eta, CS%tol_vel, 0, 0, better_flag)
-                end if
+                call set_zonal_BT_cont_kernel<<<grid2, tBlock>>>( &
+                    BT_cont%FA_u_W0, BT_cont%FA_u_WW, BT_cont%uBT_WW, &
+                    BT_cont%FA_u_E0, BT_cont%FA_u_EE, BT_cont%uBT_EE, &
+                    u_d, hin_d, ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                    ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,1), &
+                    CS%IareaT_d, CS%dy_Cu_d, CS%IdxT_d, CS%dxCu_d, ws%s2d(:,:,6), &
+                    ws%s2d(:,:,2), ws%s2d(:,:,3), ws%s2d(:,:,5), ws%s2d(:,:,4), &
+                    n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
+                    CS%tol_eta, CS%tol_vel, vol_CFL_flag, 0, better_flag, 0)
 
                 ! Flux thickness
                 if (allocated(BT_cont%h_u)) then
-                    if (present(u_cor_d) .and. has_full_args) then
-                        call zonal_flux_thickness_kernel<<<grid3, tBlock>>>( &
-                            BT_cont%h_u, u_cor_d, hin_d, CS%h_W, CS%h_E, &
-                            por_face_areaU_d, visc_rem_u_d, &
-                            CS%IareaT_d, CS%IdxT_d, CS%dy_Cu_d, &
-                            n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                            vol_CFL_flag, marginal_flag, use_visc_rem_flag)
-                    elseif (has_full_args) then
-                        call zonal_flux_thickness_kernel<<<grid3, tBlock>>>( &
-                            BT_cont%h_u, u_d, hin_d, CS%h_W, CS%h_E, &
-                            por_face_areaU_d, visc_rem_u_d, &
-                            CS%IareaT_d, CS%IdxT_d, CS%dy_Cu_d, &
-                            n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                            vol_CFL_flag, marginal_flag, use_visc_rem_flag)
-                    else
-                        call zonal_flux_thickness_kernel<<<grid3, tBlock>>>( &
-                            BT_cont%h_u, u_d, hin_d, CS%h_W, CS%h_E, &
-                            CS%por_face_areaU_def, CS%visc_rem_u_def, &
-                            CS%IareaT_d, CS%IdxT_d, CS%dy_Cu_d, &
-                            n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
-                            0, marginal_flag, 0)
-                    end if
+                    call zonal_flux_thickness_kernel<<<grid3, tBlock>>>( &
+                        BT_cont%h_u, u_d, hin_d, &
+                        ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,2), &
+                        ws%s3d(:,:,1:n3,1), ws%s3d(:,:,1:n3,1), &
+                        CS%IareaT_d, CS%IdxT_d, CS%dy_Cu_d, &
+                        n1, n2, n3, is_l, ie_l, js_l, je_l, dt, &
+                        vol_CFL_flag, marginal_flag, 0, 0)
                 end if
             end if
         end if
@@ -1360,10 +1289,6 @@ contains
 
         if (.not. CS%initialized) return
 
-        ! PPM work arrays
-        if (allocated(CS%h_W)) deallocate(CS%h_W)
-        if (allocated(CS%h_E)) deallocate(CS%h_E)
-
         ! Existing grid metrics
         if (allocated(CS%IareaT_d)) deallocate(CS%IareaT_d)
         if (allocated(CS%IdxT_d)) deallocate(CS%IdxT_d)
@@ -1375,19 +1300,6 @@ contains
         if (allocated(CS%areaT_d)) deallocate(CS%areaT_d)
         if (allocated(CS%dxCu_d)) deallocate(CS%dxCu_d)
         if (allocated(CS%mask2dCu_d)) deallocate(CS%mask2dCu_d)
-
-        ! Solver work arrays
-        if (allocated(CS%duhdu)) deallocate(CS%duhdu)
-        if (allocated(CS%du)) deallocate(CS%du)
-        if (allocated(CS%du_max_CFL)) deallocate(CS%du_max_CFL)
-        if (allocated(CS%du_min_CFL)) deallocate(CS%du_min_CFL)
-        if (allocated(CS%duhdu_tot_0)) deallocate(CS%duhdu_tot_0)
-        if (allocated(CS%uh_tot_0)) deallocate(CS%uh_tot_0)
-        if (allocated(CS%visc_rem_max_arr)) deallocate(CS%visc_rem_max_arr)
-
-        ! Default arrays
-        if (allocated(CS%por_face_areaU_def)) deallocate(CS%por_face_areaU_def)
-        if (allocated(CS%visc_rem_u_def)) deallocate(CS%visc_rem_u_def)
 
         CS%initialized = .false.
 

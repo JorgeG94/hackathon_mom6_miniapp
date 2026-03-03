@@ -13,6 +13,7 @@ program hor_visc_cuda_driver
     use mom6_hor_visc, only: hor_visc_CS, hor_visc_init, hor_visc_end
     use mom6_hor_visc_cuda, only: hor_visc_CS_cuda, hor_visc_init_cuda, &
                                    hor_visc_cuda, hor_visc_end_cuda
+    use cuda_workspace, only: cuda_workspace_type, workspace_init, workspace_end
     implicit none
 
 
@@ -20,6 +21,7 @@ program hor_visc_cuda_driver
     type(verticalGrid_type) :: GV
     type(hor_visc_CS)       :: CS
     type(hor_visc_CS_cuda)  :: CS_cuda
+    type(cuda_workspace_type) :: ws
 
     ! Host arrays
     real(dp), allocatable :: u(:,:,:), v(:,:,:), h(:,:,:)
@@ -111,17 +113,20 @@ program hor_visc_cuda_driver
     ! Copy inputs to device once
     u_d = u; v_d = v; h_d = h
 
+    ! Initialize workspace pool (2 3D slots for hor_visc scratch)
+    call workspace_init(ws, G%isd, G%ied, G%jsd, G%jed, nk, 2, 0)
+
     ! Warmup
     print '(A)', ''
     print '(A)', 'Warming up CUDA kernel...'
-    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS_cuda, nk)
+    call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS_cuda, nk, ws)
 
     ! Benchmark
     print '(A)', 'Benchmarking CUDA (Laplacian)...'
     t_cuda = 0.0_dp
     do iter = 1, niter
         t_start = omp_get_wtime()
-        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS_cuda, nk)
+        call hor_visc_cuda(u_d, v_d, h_d, diffu_d, diffv_d, CS_cuda, nk, ws)
         t_end = omp_get_wtime()
         t_cuda = t_cuda + (t_end - t_start)
     end do
@@ -165,6 +170,7 @@ program hor_visc_cuda_driver
     print '(A)', '================================================================'
 
     ! Cleanup
+    call workspace_end(ws)
     call hor_visc_end(CS)
     call hor_visc_end_cuda(CS_cuda)
     call end_ocean_grid(G)
