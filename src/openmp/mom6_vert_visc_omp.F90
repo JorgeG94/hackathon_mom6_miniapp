@@ -14,7 +14,7 @@
 !!
 module mom6_vert_visc_omp
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type, RHO_0, &
+    use mom6_types, only: ocean_grid_type, verticalGrid_type, &
                           mech_forcing_type, vertvisc_type
     implicit none
     private
@@ -56,6 +56,9 @@ module mom6_vert_visc_omp
 
         integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type vert_visc_CS
+
+    ! Local constant to avoid device symbol duplication with AMD flang
+    real(dp), parameter :: LOCAL_LOCAL_RHO_0 = 1035.0_dp  ! Reference density [kg m-3]
 
 contains
 
@@ -436,7 +439,7 @@ contains
         integer :: i, j, k, is, ie, js, je, nz
 
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
-        dt_Rho0 = dt / RHO_0
+        dt_Rho0 = dt / LOCAL_RHO_0
 
         have_forces = present(forces)
         have_rayleigh = .false.
@@ -482,11 +485,11 @@ contains
                 end do
 
                 ! Bottom stress output
-                CS%taux_bot(i, j) = RHO_0 * u(i, j, nz) * CS%a_u(i, j, nz + 1)
+                CS%taux_bot(i, j) = LOCAL_RHO_0 * u(i, j, nz) * CS%a_u(i, j, nz + 1)
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%taux_bot(i, j) = CS%taux_bot(i, j) + &
-                            RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
                     end do
                 end if
 
@@ -526,11 +529,11 @@ contains
                     v(i, j, k) = v(i, j, k) + c1(k + 1) * v(i, j, k + 1)
                 end do
 
-                CS%tauy_bot(i, j) = RHO_0 * v(i, j, nz) * CS%a_v(i, j, nz + 1)
+                CS%tauy_bot(i, j) = LOCAL_RHO_0 * v(i, j, nz) * CS%a_v(i, j, nz + 1)
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%tauy_bot(i, j) = CS%tauy_bot(i, j) + &
-                            RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
                     end do
                 end if
 
@@ -573,7 +576,7 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         h_neglect = GV%Angstrom_H
         I_Hbbl = 1.0_dp / (CS%Hbbl + h_neglect)
-        dt_Rho0 = dt / RHO_0
+        dt_Rho0 = dt / LOCAL_RHO_0
 
         have_forces = present(forces)
         have_rayleigh = .false.
@@ -682,11 +685,11 @@ contains
                 end do
 
                 ! Bottom stress (a_k1 is a_col(nz+1) after the loop)
-                CS%taux_bot(i, j) = RHO_0 * u(i, j, nz) * a_k1
+                CS%taux_bot(i, j) = LOCAL_RHO_0 * u(i, j, nz) * a_k1
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%taux_bot(i, j) = CS%taux_bot(i, j) + &
-                            RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
                     end do
                 end if
 
@@ -786,11 +789,11 @@ contains
                     v(i, j, k) = v(i, j, k) + z_i(k + 1) * v(i, j, k + 1)
                 end do
 
-                CS%tauy_bot(i, j) = RHO_0 * v(i, j, nz) * a_k1
+                CS%tauy_bot(i, j) = LOCAL_RHO_0 * v(i, j, nz) * a_k1
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%tauy_bot(i, j) = CS%tauy_bot(i, j) + &
-                            RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
                     end do
                 end if
 
@@ -830,7 +833,7 @@ contains
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
         h_neglect = GV%Angstrom_H
         I_Hbbl = 1.0_dp / (CS%Hbbl + h_neglect)
-        dt_Rho0 = dt / RHO_0
+        dt_Rho0 = dt / LOCAL_RHO_0
 
         have_forces = present(forces)
         have_rayleigh = .false.
@@ -941,11 +944,11 @@ contains
                 end do
 
                 ! Bottom stress
-                CS%taux_bot(i, j) = RHO_0 * u(i, j, nz) * a_k1
+                CS%taux_bot(i, j) = LOCAL_RHO_0 * u(i, j, nz) * a_k1
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%taux_bot(i, j) = CS%taux_bot(i, j) + &
-                            RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_u(i, j, k) * u(i, j, k)
                     end do
                 end if
 
@@ -1054,11 +1057,11 @@ contains
                     v(i, j, k) = v(i, j, k) + z_i(k + 1) * v(i, j, k + 1)
                 end do
 
-                CS%tauy_bot(i, j) = RHO_0 * v(i, j, nz) * a_k1
+                CS%tauy_bot(i, j) = LOCAL_RHO_0 * v(i, j, nz) * a_k1
                 if (have_rayleigh) then
                     do k = 1, nz
                         CS%tauy_bot(i, j) = CS%tauy_bot(i, j) + &
-                            RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
+                            LOCAL_RHO_0 * visc%Ray_v(i, j, k) * v(i, j, k)
                     end do
                 end if
 

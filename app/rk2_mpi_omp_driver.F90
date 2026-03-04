@@ -12,7 +12,7 @@ program rk2_mpi_omp_driver
     use iso_fortran_env, only: dp => real64, int64
     use omp_lib, only: omp_set_default_device
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
-                          end_ocean_grid, G_EARTH, HALO_WIDTH, PI, &
+                          end_ocean_grid, &
                           BT_cont_type, alloc_BT_cont_type, &
                           mech_forcing_type, vertvisc_type, &
                           init_mech_forcing, end_mech_forcing, &
@@ -31,6 +31,11 @@ program rk2_mpi_omp_driver
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
     implicit none
+
+    ! Local constants to avoid device symbol duplication with AMD flang
+    real(dp), parameter :: LOCAL_LOCAL_G_EARTH = 9.80_dp
+    real(dp), parameter :: LOCAL_PI = 3.14159265358979323846_dp
+    integer, parameter :: LOCAL_LOCAL_HALO_WIDTH = 7
 
     ! Grid structures
     type(ocean_grid_type) :: G
@@ -203,13 +208,13 @@ program rk2_mpi_omp_driver
     !$omp target update to(visc%Ray_u, visc%Ray_v)
 
     ! Initial halo exchange to fill halos before first iteration
-    call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-    call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-    call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-    call halo_exchange_3d(h0, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-    call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
-    call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
-    call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+    call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_3d(h0, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
+    call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
 
     call profiler_stop("Initialization")
     call system_clock(init_clock_end)
@@ -260,8 +265,8 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange: uh, vh needed by Coriolis
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -328,8 +333,8 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange: up, vp needed by corrector continuity
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(up, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_3d(vp, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(up, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_3d(vp, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -344,7 +349,7 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange after predictor: h, uh needed by corrector
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -358,8 +363,8 @@ program rk2_mpi_omp_driver
             call profiler_stop("Transports")
 
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
+            call halo_exchange_3d(uh, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_3d(vh, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -443,12 +448,12 @@ program rk2_mpi_omp_driver
 
             ! Halo exchange after corrector for next iteration
             call system_clock(halo_clock_start, halo_clock_rate)
-            call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, HALO_WIDTH)
-            call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
-            call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
-            call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, HALO_WIDTH)
+            call halo_exchange_3d(u, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_3d(v, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_3d(h, G%isd, G%ied, G%jsd, G%jed, nk, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_2d(eta, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_2d(ubt, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
+            call halo_exchange_2d(vbt, G%isd, G%ied, G%jsd, G%jed, MD, LOCAL_HALO_WIDTH)
             call system_clock(halo_clock_end)
             t_halo = t_halo + real(halo_clock_end - halo_clock_start, dp) / real(halo_clock_rate, dp)
 
@@ -547,8 +552,8 @@ contains
               j_global = j + MD%j_offset
 
               h0(i, j, k) = total_depth / real(GV%ke, dp) + &
-                            10.0_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI) * &
-                            cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI) * &
+                            10.0_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * LOCAL_PI) * &
+                            cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * LOCAL_PI) * &
                             exp(-real(k, dp) / 20.0_dp)
               h(i, j, k) = h0(i, j, k)
 
@@ -568,8 +573,8 @@ contains
 
             eta(i, j) = 0.5_dp * sin(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI * 2.0_dp) * &
                         cos(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI * 2.0_dp)
-            ubt(i, j) = 0.05_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI)
-            vbt(i, j) = 0.05_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * PI)
+            ubt(i, j) = 0.05_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * LOCAL_PI)
+            vbt(i, j) = 0.05_dp * cos(real(i_global - 1, dp) / real(MD%ni_global, dp) * LOCAL_PI)
           end do
         end do
 
@@ -589,7 +594,7 @@ contains
         do j = G%jsd, G%jed
           do i = G%isd, G%ied
             j_global = j + MD%j_offset
-            forces%taux(i, j) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * PI)
+            forces%taux(i, j) = 0.1_dp * sin(real(j_global - 1, dp) / real(MD%nj_global, dp) * LOCAL_PI)
             forces%tauy(i, j) = 0.0_dp
           end do
         end do
@@ -723,7 +728,7 @@ contains
 
         dx_m = dx_km * 1000.0_dp
         dtbt = dt / real(nsteps, dp)
-        c_grav = sqrt(G_EARTH * depth)
+        c_grav = sqrt(LOCAL_G_EARTH * depth)
         cfl = c_grav * dtbt / dx_m
         cfl_2d = cfl * sqrt(2.0_dp)
         min_nsteps = ceiling(dt * c_grav / dx_m * 2.5_dp)

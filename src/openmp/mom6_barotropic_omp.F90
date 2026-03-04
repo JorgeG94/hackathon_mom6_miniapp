@@ -10,7 +10,7 @@
 !!
 module mom6_barotropic_omp
     use iso_fortran_env, only: dp => real64, int64
-    use mom6_types, only: ocean_grid_type, verticalGrid_type, G_EARTH
+    use mom6_types, only: ocean_grid_type, verticalGrid_type
     implicit none
     private
 
@@ -60,6 +60,9 @@ module mom6_barotropic_omp
 
         integer(int64) :: nbytes = 0  ! Total bytes allocated for GPU arrays
     end type barotropic_CS
+
+    ! Local constant to avoid device symbol duplication with AMD flang
+    real(dp), parameter :: LOCAL_LOCAL_G_EARTH = 9.80_dp  ! Gravitational acceleration [m s-2]
 
 contains
 
@@ -115,10 +118,10 @@ contains
         do i=G%isd,G%ied
             CS%Datu(i, j) = depth*G%dyCu(i, j)
             CS%Datv(i, j) = depth*G%dxCv(i, j)
-            CS%gtot_E(i, j) = G_EARTH
-            CS%gtot_W(i, j) = G_EARTH
-            CS%gtot_N(i, j) = G_EARTH
-            CS%gtot_S(i, j) = G_EARTH
+            CS%gtot_E(i, j) = LOCAL_G_EARTH
+            CS%gtot_W(i, j) = LOCAL_G_EARTH
+            CS%gtot_N(i, j) = LOCAL_G_EARTH
+            CS%gtot_S(i, j) = LOCAL_G_EARTH
             CS%bt_rem_u(i, j) = 0.999_dp  ! Small drag
             CS%bt_rem_v(i, j) = 0.999_dp
         end do

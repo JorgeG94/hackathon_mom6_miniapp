@@ -20,7 +20,7 @@
 program rk2_omp_driver
     use iso_fortran_env, only: dp => real64, int64
     use mom6_types, only: ocean_grid_type, verticalGrid_type, init_ocean_grid, &
-                          init_verticalGrid, end_ocean_grid, G_EARTH, PI, &
+                          init_verticalGrid, end_ocean_grid, &
                           BT_cont_type, alloc_BT_cont_type, &
                           mech_forcing_type, vertvisc_type, &
                           init_mech_forcing, end_mech_forcing, &
@@ -33,12 +33,17 @@ program rk2_omp_driver
                               vert_visc_apply, vert_visc_end, vert_visc_remnant, &
                               vert_visc_coef_apply
     use mom6_hor_visc_omp, only: hor_visc_CS, hor_visc_init, hor_visc, hor_visc_end
-    use mom6_diag, only: diag_ctrl, diag_init, diag_end, register_diag_field, DIAG_STATS, &
+    use mom6_diag, only: diag_ctrl, diag_init, diag_end, register_diag_field, &
                          post_data_3d, post_data_2d, post_product_sum_u, post_product_sum_v, &
                          diag_report_timing
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
                              profiler_report
     implicit none
+
+    ! Local constants to avoid device symbol duplication with AMD flang
+    real(dp), parameter :: LOCAL_LOCAL_G_EARTH = 9.80_dp
+    real(dp), parameter :: LOCAL_PI = 3.14159265358979323846_dp
+    integer, parameter :: LOCAL_LOCAL_DIAG_STATS = 1
 
     ! Grid structures
     type(ocean_grid_type) :: G
@@ -162,16 +167,16 @@ program rk2_omp_driver
     ! Register diagnostics (controlled by diag_mode: 0=off, 1=on)
     if (diag_mode > 0) then
         id_KE = register_diag_field(diag_CS, 'KE', 'Kinetic Energy', 'm2/s2', &
-                                    3, 'h', DIAG_STATS)
+                                    3, 'h', LOCAL_DIAG_STATS)
         id_diffu_sum = register_diag_field(diag_CS, 'diffu_sum', &
                                            'Vertically summed u-diffusion', 'm/s2', &
-                                           2, 'u', DIAG_STATS)
+                                           2, 'u', LOCAL_DIAG_STATS)
         id_diffv_sum = register_diag_field(diag_CS, 'diffv_sum', &
                                            'Vertically summed v-diffusion', 'm/s2', &
-                                           2, 'v', DIAG_STATS)
+                                           2, 'v', LOCAL_DIAG_STATS)
         id_mass = register_diag_field(diag_CS, 'mass', &
                                       'Vertically summed thickness', 'm', &
-                                      2, 'h', DIAG_STATS)
+                                      2, 'h', LOCAL_DIAG_STATS)
     else
         id_KE = -1
         id_diffu_sum = -1
@@ -550,8 +555,8 @@ contains
             do i=G%isd,G%ied
             ! Layer thickness with baroclinic structure
             h0(i, j, k) = total_depth/real(GV%ke, dp) + &
-                          10.0_dp*sin(real(i - 1, dp)/real(G%ni, dp)*PI)* &
-                          cos(real(j - 1, dp)/real(G%nj, dp)*PI)* &
+                          10.0_dp*sin(real(i - 1, dp)/real(G%ni, dp)*LOCAL_PI)* &
+                          cos(real(j - 1, dp)/real(G%nj, dp)*LOCAL_PI)* &
                           exp(-real(k, dp)/20.0_dp)
             h(i, j, k) = h0(i, j, k)
 
@@ -570,8 +575,8 @@ contains
           do i=G%isd,G%ied
             eta(i, j) = 0.5_dp*sin(real(i - 1, dp)/real(G%ni, dp)*PI*2.0_dp)* &
                         cos(real(j - 1, dp)/real(G%nj, dp)*PI*2.0_dp)
-            ubt(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(G%nj, dp)*PI)
-            vbt(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(G%ni, dp)*PI)
+            ubt(i, j) = 0.05_dp*sin(real(j - 1, dp)/real(G%nj, dp)*LOCAL_PI)
+            vbt(i, j) = 0.05_dp*cos(real(i - 1, dp)/real(G%ni, dp)*LOCAL_PI)
           end do
         end do
 
@@ -709,7 +714,7 @@ contains
 
         dx_m = dx_km*1000.0_dp
         dtbt = dt/real(nsteps, dp)
-        c_grav = sqrt(G_EARTH*depth)  ! Gravity wave speed [m/s]
+        c_grav = sqrt(LOCAL_G_EARTH*depth)  ! Gravity wave speed [m/s]
         cfl = c_grav*dtbt/dx_m
         cfl_2d = cfl*sqrt(2.0_dp)     ! 2D diagonal CFL
 
