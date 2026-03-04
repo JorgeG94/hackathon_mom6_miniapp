@@ -1,17 +1,19 @@
 # MOM6 Mini-Apps Makefile
 #
-# Default target builds all three MPI drivers (realistic multi-GPU).
+# OpenMP target offloading is the default backend (works on AMD, Intel, NVIDIA).
+# OpenACC and CUDA Fortran are opt-in (require nvfortran).
 #
 # Targets:
-#   make              - Build all MPI drivers (OpenACC, CUDA, OpenMP target)
-#   make mpi          - Build build/rk2_mpi_driver (OpenACC + MPI)
-#   make mpi-cuda     - Build build/rk2_mpi_cuda_driver (CUDA + MPI)
-#   make mpi-omp      - Build build/rk2_mpi_omp_driver (OpenMP target + MPI)
-#   make single-gpu   - Build build/rk2_driver (OpenACC, single GPU)
-#   make cuda         - Build build/rk2_cuda_driver (single GPU)
+#   make              - Build OpenMP target single-GPU driver (default)
 #   make omp          - Build build/rk2_omp_driver (OpenMP target, single GPU)
+#   make mpi-omp      - Build build/rk2_mpi_omp_driver (OpenMP target + MPI)
+#   make single-gpu   - Build build/rk2_driver (OpenACC, single GPU, requires nvfortran)
+#   make mpi          - Build build/rk2_mpi_driver (OpenACC + MPI, requires nvfortran)
+#   make cuda         - Build build/rk2_cuda_driver (CUDA, single GPU, requires nvfortran)
+#   make mpi-cuda     - Build build/rk2_mpi_cuda_driver (CUDA + MPI, requires nvfortran)
 #   make modules      - Build all 5 OpenACC module drivers into build/
 #   make modules-cuda - Build all 6 CUDA module drivers into build/
+#   make all-backends - Build all MPI drivers (OpenACC, CUDA, OpenMP target)
 #   make small_scaling - Run scripts/benchmark_scaling.sh
 #   make large_scaling - Run scripts/strong_scaling.sh
 #   make plots        - Run plotting scripts
@@ -20,6 +22,9 @@
 
 # Default compiler
 FC ?= gfortran
+
+# GPU backend: omp (default) or openacc (requires nvfortran, pass GPU_BACKEND=openacc)
+GPU_BACKEND ?= omp
 
 # Directories
 SRCDIR_COMMON  = src/common
@@ -41,12 +46,12 @@ else ifneq (,$(findstring gfortran,$(FC)))
   MODFLAG = -J
 else ifneq (,$(findstring ifx,$(FC)))
   # Intel ifx
-  FFLAGS = -O3 -heap-arrays
+  FFLAGS = -O3 -heap-arrays -fiopenmp -fopenmp-targets=spir64
   LDFLAGS =
   MODFLAG = -module
-else ifneq (,$(findstring flang-new,$(FC)))
-  # LLVM Flang
-  FFLAGS = -O3
+else ifneq (,$(findstring amdflang,$(FC)))
+  # LLVM Flang (OpenMP target offloading for AMD GPUs)
+  FFLAGS = -O3 -fopenmp --offload-arch=gfx90a -fopenmp-offload-mandatory -fPIC
   LDFLAGS =
   MODFLAG = -J
 else ifneq (,$(findstring lfortran,$(FC)))
@@ -60,30 +65,43 @@ else
   MODFLAG = -J
 endif
 
+# Preprocessor flags for GPU backend selection
+ifeq ($(GPU_BACKEND),omp)
+  CPPFLAGS = -DUSE_OMP_OFFLOAD
+else
+  CPPFLAGS =
+endif
+
 # MPI compiler wrapper (wraps FC)
 MPI_FC = mpif90
 
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
 
-# CUDA kernel objects
+# =============================================================================
+# Object groups
+# =============================================================================
+
+# Common objects (always built — types, profiler, diagnostics)
+COMMON_MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
+                 $(BUILDDIR)/mom6_diag.o
+
+# OpenACC objects (opt-in, requires nvfortran)
+OPENACC_MODULES = $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_adjust.o \
+                  $(BUILDDIR)/mom6_coriolis.o $(BUILDDIR)/mom6_barotropic.o \
+                  $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_hor_visc.o
+
+# OpenMP target objects (default backend)
+OMP_MODULES = $(BUILDDIR)/mom6_continuity_omp.o $(BUILDDIR)/mom6_continuity_adjust_omp.o \
+              $(BUILDDIR)/mom6_coriolis_omp.o $(BUILDDIR)/mom6_barotropic_omp.o \
+              $(BUILDDIR)/mom6_vert_visc_omp.o $(BUILDDIR)/mom6_hor_visc_omp.o
+
+# CUDA kernel objects (opt-in, requires nvfortran)
 CUDA_MODULES = $(BUILDDIR)/mom6_coriolis_cuda.o \
                $(BUILDDIR)/mom6_vert_visc_cuda.o \
                $(BUILDDIR)/mom6_barotropic_cuda.o \
                $(BUILDDIR)/mom6_hor_visc_cuda.o \
                $(BUILDDIR)/mom6_continuity_cuda.o
-
-# Module objects
-MODULES = $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o \
-          $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_adjust.o \
-          $(BUILDDIR)/mom6_coriolis.o $(BUILDDIR)/mom6_barotropic.o \
-          $(BUILDDIR)/mom6_vert_visc.o $(BUILDDIR)/mom6_hor_visc.o \
-          $(BUILDDIR)/mom6_diag.o
-
-# OpenMP target module objects
-OMP_MODULES = $(BUILDDIR)/mom6_continuity_omp.o $(BUILDDIR)/mom6_continuity_adjust_omp.o \
-              $(BUILDDIR)/mom6_coriolis_omp.o $(BUILDDIR)/mom6_barotropic_omp.o \
-              $(BUILDDIR)/mom6_vert_visc_omp.o $(BUILDDIR)/mom6_hor_visc_omp.o
 
 # MPI module objects
 MPI_MODULES = $(BUILDDIR)/mom6_mpi_domain.o $(BUILDDIR)/mom6_mpi_halo.o
@@ -100,24 +118,27 @@ CUDA_DRIVERS = $(BUILDDIR)/continuity_cuda_driver $(BUILDDIR)/coriolis_cuda_driv
                $(BUILDDIR)/barotropic_cuda_driver $(BUILDDIR)/vert_visc_cuda_driver \
                $(BUILDDIR)/hor_visc_cuda_driver $(BUILDDIR)/rk2_cuda_driver
 
-.PHONY: all single-gpu cuda omp mpi mpi-cuda mpi-omp modules modules-cuda clean info small_scaling large_scaling plots
+.PHONY: all single-gpu cuda omp mpi mpi-cuda mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
 
-# Default: build all MPI drivers (realistic multi-GPU)
-all: mpi mpi-cuda mpi-omp
+# Default: build OpenMP target single-GPU driver
+all: omp
 
-# Single-GPU targets (not built by default)
+# All backends (requires nvfortran for OpenACC and CUDA)
+all-backends: mpi mpi-cuda mpi-omp
+
+# Single-GPU targets
+omp: $(BUILDDIR)/rk2_omp_driver
+
 single-gpu: $(BUILDDIR)/rk2_driver
 
 cuda: $(BUILDDIR)/rk2_cuda_driver
 
-omp: $(BUILDDIR)/rk2_omp_driver
-
 # MPI targets
+mpi-omp: $(BUILDDIR)/rk2_mpi_omp_driver
+
 mpi: $(BUILDDIR)/rk2_mpi_driver
 
 mpi-cuda: $(BUILDDIR)/rk2_mpi_cuda_driver
-
-mpi-omp: $(BUILDDIR)/rk2_mpi_omp_driver
 
 modules: $(MODULE_DRIVERS)
 
@@ -127,55 +148,20 @@ $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
 #==============================================================================
-# Module compilation (order matters due to dependencies)
+# Common module compilation (src/common — always built)
 #==============================================================================
 
 $(BUILDDIR)/mom6_types.o: $(SRCDIR_COMMON)/mom6_types.F90 | $(BUILDDIR)
-	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+	$(FC) $(FFLAGS) $(CPPFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 $(BUILDDIR)/mom6_profiler.o: $(SRCDIR_COMMON)/mom6_profiler.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_continuity.o: $(SRCDIR_OPENACC)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-# Submodule with zonal_flux_adjust_gpu and set_zonal_BT_cont_gpu
-$(BUILDDIR)/mom6_continuity_adjust.o: $(SRCDIR_OPENACC)/mom6_continuity_adjust.F90 $(BUILDDIR)/mom6_continuity.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_coriolis.o: $(SRCDIR_OPENACC)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_barotropic.o: $(SRCDIR_OPENACC)/mom6_barotropic.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_vert_visc.o: $(SRCDIR_OPENACC)/mom6_vert_visc.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_hor_visc.o: $(SRCDIR_OPENACC)/mom6_hor_visc.F90 $(BUILDDIR)/mom6_types.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 $(BUILDDIR)/mom6_diag.o: $(SRCDIR_COMMON)/mom6_diag.F90 $(BUILDDIR)/mom6_types.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 #==============================================================================
-# MPI module compilation (requires MPI compiler wrapper)
-#==============================================================================
-
-$(BUILDDIR)/mom6_mpi_domain.o: $(SRCDIR_COMMON)/mom6_mpi_domain.F90 $(BUILDDIR)/mom6_types.o
-	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_mpi_halo.o: $(SRCDIR_COMMON)/mom6_mpi_halo.F90 $(BUILDDIR)/mom6_mpi_domain.o
-	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_mpi_halo_cuda.o: $(SRCDIR_CUDA)/mom6_mpi_halo_cuda.F90 $(BUILDDIR)/mom6_mpi_domain.o
-	$(MPI_FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-$(BUILDDIR)/mom6_mpi_halo_omp.o: $(SRCDIR_OPENMP)/mom6_mpi_halo_omp.F90 $(BUILDDIR)/mom6_mpi_domain.o
-	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
-
-#==============================================================================
-# OpenMP target module compilation
+# OpenMP target module compilation (src/openmp — default backend)
 #==============================================================================
 
 $(BUILDDIR)/mom6_continuity_omp.o: $(SRCDIR_OPENMP)/mom6_continuity_omp.F90 $(BUILDDIR)/mom6_types.o
@@ -197,11 +183,63 @@ $(BUILDDIR)/mom6_hor_visc_omp.o: $(SRCDIR_OPENMP)/mom6_hor_visc_omp.F90 $(BUILDD
 	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 #==============================================================================
-# OpenACC driver compilation (all output to build/)
+# OpenMP target driver compilation (default)
 #==============================================================================
 
-$(BUILDDIR)/continuity_driver: $(APPDIR)/continuity_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_adjust.o
-	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_continuity.o $(BUILDDIR)/mom6_continuity_adjust.o $(LDFLAGS)
+$(BUILDDIR)/rk2_omp_driver: $(APPDIR)/rk2_omp_driver.F90 $(COMMON_MODULES) $(OMP_MODULES)
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OMP_MODULES) $(LDFLAGS)
+
+#==============================================================================
+# MPI module compilation (requires MPI compiler wrapper)
+#==============================================================================
+
+$(BUILDDIR)/mom6_mpi_domain.o: $(SRCDIR_COMMON)/mom6_mpi_domain.F90 $(BUILDDIR)/mom6_types.o
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_mpi_halo.o: $(SRCDIR_COMMON)/mom6_mpi_halo.F90 $(BUILDDIR)/mom6_mpi_domain.o
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_mpi_halo_omp.o: $(SRCDIR_OPENMP)/mom6_mpi_halo_omp.F90 $(BUILDDIR)/mom6_mpi_domain.o
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_mpi_halo_cuda.o: $(SRCDIR_CUDA)/mom6_mpi_halo_cuda.F90 $(BUILDDIR)/mom6_mpi_domain.o
+	$(MPI_FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+#==============================================================================
+# MPI + OpenMP target driver compilation
+#==============================================================================
+
+$(BUILDDIR)/rk2_mpi_omp_driver: $(APPDIR)/rk2_mpi_omp_driver.F90 $(COMMON_MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES)
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES) $(LDFLAGS)
+
+#==============================================================================
+# OpenACC module compilation (src/openacc — opt-in, requires nvfortran)
+#==============================================================================
+
+$(BUILDDIR)/mom6_continuity.o: $(SRCDIR_OPENACC)/mom6_continuity.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_continuity_adjust.o: $(SRCDIR_OPENACC)/mom6_continuity_adjust.F90 $(BUILDDIR)/mom6_continuity.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_coriolis.o: $(SRCDIR_OPENACC)/mom6_coriolis.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_barotropic.o: $(SRCDIR_OPENACC)/mom6_barotropic.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_vert_visc.o: $(SRCDIR_OPENACC)/mom6_vert_visc.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_hor_visc.o: $(SRCDIR_OPENACC)/mom6_hor_visc.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+#==============================================================================
+# OpenACC driver compilation (requires nvfortran)
+#==============================================================================
+
+$(BUILDDIR)/continuity_driver: $(APPDIR)/continuity_driver.F90 $(COMMON_MODULES) $(OPENACC_MODULES)
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OPENACC_MODULES) $(LDFLAGS)
 
 $(BUILDDIR)/coriolis_driver: $(APPDIR)/coriolis_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_coriolis.o $(LDFLAGS)
@@ -215,29 +253,15 @@ $(BUILDDIR)/vert_visc_driver: $(APPDIR)/vert_visc_driver.F90 $(BUILDDIR)/mom6_ty
 $(BUILDDIR)/hor_visc_driver: $(APPDIR)/hor_visc_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_hor_visc.o $(LDFLAGS)
 
-$(BUILDDIR)/rk2_driver: $(APPDIR)/rk2_driver.F90 $(MODULES)
-	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(MODULES) $(LDFLAGS)
+$(BUILDDIR)/rk2_driver: $(APPDIR)/rk2_driver.F90 $(COMMON_MODULES) $(OPENACC_MODULES)
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OPENACC_MODULES) $(LDFLAGS)
 
 #==============================================================================
-# OpenMP target driver compilation
+# MPI + OpenACC driver compilation (requires nvfortran)
 #==============================================================================
 
-$(BUILDDIR)/rk2_omp_driver: $(APPDIR)/rk2_omp_driver.F90 $(MODULES) $(OMP_MODULES)
-	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(MODULES) $(OMP_MODULES) $(LDFLAGS)
-
-#==============================================================================
-# MPI driver compilation (OpenACC + MPI)
-#==============================================================================
-
-$(BUILDDIR)/rk2_mpi_driver: $(APPDIR)/rk2_mpi_driver.F90 $(MODULES) $(MPI_MODULES)
-	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(MODULES) $(MPI_MODULES) $(LDFLAGS)
-
-#==============================================================================
-# MPI + OpenMP target driver compilation
-#==============================================================================
-
-$(BUILDDIR)/rk2_mpi_omp_driver: $(APPDIR)/rk2_mpi_omp_driver.F90 $(MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES)
-	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES) $(LDFLAGS)
+$(BUILDDIR)/rk2_mpi_driver: $(APPDIR)/rk2_mpi_driver.F90 $(COMMON_MODULES) $(OPENACC_MODULES) $(MPI_MODULES)
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OPENACC_MODULES) $(MPI_MODULES) $(LDFLAGS)
 
 #==============================================================================
 # CUDA Fortran kernel compilation (nvfortran only, -cuda flag)
@@ -259,7 +283,7 @@ $(BUILDDIR)/mom6_continuity_cuda.o: $(SRCDIR_CUDA)/mom6_continuity_cuda.F90 | $(
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 #==============================================================================
-# CUDA driver compilation (all output to build/)
+# CUDA driver compilation (requires nvfortran)
 #==============================================================================
 
 $(BUILDDIR)/continuity_cuda_driver: $(APPDIR)/continuity_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_continuity_cuda.o
@@ -281,7 +305,7 @@ $(BUILDDIR)/rk2_cuda_driver: $(APPDIR)/rk2_cuda_driver.F90 $(BUILDDIR)/mom6_type
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES) $(LDFLAGS) -cuda
 
 #==============================================================================
-# MPI + CUDA driver compilation
+# MPI + CUDA driver compilation (requires nvfortran)
 #==============================================================================
 
 $(BUILDDIR)/rk2_mpi_cuda_driver: $(APPDIR)/rk2_mpi_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES) $(MPI_CUDA_MODULES)
@@ -312,7 +336,12 @@ info:
 	@echo "========================================"
 	@echo "MOM6 Mini-Apps Build Configuration"
 	@echo "========================================"
-	@echo "Compiler: $(FC)"
-	@echo "FFLAGS:   $(FFLAGS)"
-	@echo "LDFLAGS:  $(LDFLAGS)"
+	@echo "Compiler:    $(FC)"
+	@echo "GPU backend: $(GPU_BACKEND)"
+	@echo "FFLAGS:      $(FFLAGS)"
+	@echo "CPPFLAGS:    $(CPPFLAGS)"
+	@echo "LDFLAGS:     $(LDFLAGS)"
+	@echo "========================================"
+	@echo "Default target: omp (OpenMP target offloading)"
+	@echo "For OpenACC: make GPU_BACKEND=openacc FC=nvfortran single-gpu"
 	@echo "========================================"

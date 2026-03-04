@@ -24,6 +24,10 @@ module mom6_vert_visc_omp
     public :: vert_visc_coef_apply, vert_visc_coef_remnant_apply
     public :: vert_visc_CS
 
+    ! Maximum supported vertical layers — used for thread-local arrays in target
+    ! regions to avoid runtime-sized VLAs which fail on AMD GPUs.
+    integer, parameter :: MAX_NK = 200
+
     !> Control structure for vertical viscosity solver
     type :: vert_visc_CS
         logical :: initialized = .false.
@@ -161,7 +165,7 @@ contains
         real(dp) :: h_neglect, I_Hbbl
         real(dp) :: h_harm, h_arith, h_delta, z2, botfn
         real(dp) :: z_top, Kv_tot, topfn, h_shear
-        real(dp) :: hvel(GV%ke), z_i(GV%ke + 1)
+        real(dp) :: hvel(MAX_NK), z_i(MAX_NK + 1)
         integer :: i, j, k, K2, is, ie, js, je, nz
 
         is = G%isc; ie = G%iec; js = G%jsc; je = G%jec; nz = GV%ke
@@ -325,7 +329,7 @@ contains
         type(vertvisc_type), intent(in), optional :: visc
 
         real(dp) :: b1, d1, b_denom_1, Ray
-        real(dp) :: c1(GV%ke)
+        real(dp) :: c1(MAX_NK)
         logical :: have_rayleigh
         integer :: i, j, k, is, ie, js, je, nz
 
@@ -431,7 +435,7 @@ contains
         type(vertvisc_type), intent(in), optional :: visc
 
         real(dp) :: dt_Rho0, sfc_stress, Ray, b1, d1, b_denom_1
-        real(dp) :: c1(GV%ke)
+        real(dp) :: c1(MAX_NK)
         logical :: have_forces, have_rayleigh
         integer :: i, j, k, is, ie, js, je, nz
 
@@ -566,7 +570,7 @@ contains
         real(dp) :: sfc_stress, Ray, b1, d1, b_denom_1
         real(dp) :: a_k, a_k1    ! on-the-fly a_col(k) and a_col(k+1)
         real(dp) :: h_eff        ! hvel(k) + h_neglect
-        real(dp) :: hvel(GV%ke), z_i(GV%ke + 1)
+        real(dp) :: hvel(MAX_NK), z_i(MAX_NK + 1)
         logical :: have_forces, have_rayleigh
         integer :: i, j, k, is, ie, js, je, nz
 
@@ -823,7 +827,7 @@ contains
         real(dp) :: z_top, Kv_tot, topfn, h_shear
         real(dp) :: sfc_stress, Ray, b1, d1, b_denom_1
         real(dp) :: a_k, a_k1, h_eff
-        real(dp) :: hvel(GV%ke), z_i(GV%ke + 1)
+        real(dp) :: hvel(MAX_NK), z_i(MAX_NK + 1)
         logical :: have_forces, have_rayleigh
         integer :: i, j, k, is, ie, js, je, nz
 
