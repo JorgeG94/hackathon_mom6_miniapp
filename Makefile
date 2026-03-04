@@ -11,8 +11,10 @@
 #   make mpi          - Build build/rk2_mpi_driver (OpenACC + MPI, requires nvfortran)
 #   make cuda         - Build build/rk2_cuda_driver (CUDA, single GPU, requires nvfortran)
 #   make cuda-c       - Build build/rk2_cuda_c_driver (CUDA C kernels + nvfortran driver)
+#   make serial       - Build build/rk2_serial_driver (pure CPU serial, no GPU)
 #   make mpi-cuda     - Build build/rk2_mpi_cuda_driver (CUDA + MPI, requires nvfortran)
 #   make mpi-cuda-c   - Build build/rk2_mpi_cuda_c_driver (CUDA C kernels + MPI)
+#   make mpi-serial   - Build build/rk2_mpi_serial_driver (serial CPU + MPI)
 #   make modules      - Build all 5 OpenACC module drivers into build/
 #   make modules-cuda - Build all 6 CUDA module drivers into build/
 #   make all-backends - Build all MPI drivers (OpenACC, CUDA, OpenMP target)
@@ -34,6 +36,7 @@ SRCDIR_OPENACC = src/openacc
 SRCDIR_CUDA    = src/cuda
 SRCDIR_OPENMP  = src/openmp
 SRCDIR_CUDA_C  = src/cuda_c
+SRCDIR_SERIAL  = src/serial
 APPDIR   = app
 BUILDDIR = build
 
@@ -122,6 +125,13 @@ CUDA_C_MODULES = $(CUDA_C_COMMON) \
                  $(BUILDDIR)/mom6_barotropic_kernels.o $(BUILDDIR)/mom6_barotropic_cuda_c.o \
                  $(BUILDDIR)/mom6_continuity_kernels.o $(BUILDDIR)/mom6_continuity_cuda_c.o
 
+# Serial CPU objects (no GPU directives)
+SERIAL_MODULES = $(BUILDDIR)/mom6_continuity_serial.o \
+                 $(BUILDDIR)/mom6_coriolis_serial.o \
+                 $(BUILDDIR)/mom6_barotropic_serial.o \
+                 $(BUILDDIR)/mom6_vert_visc_serial.o \
+                 $(BUILDDIR)/mom6_hor_visc_serial.o
+
 # MPI module objects
 MPI_MODULES = $(BUILDDIR)/mom6_mpi_domain.o $(BUILDDIR)/mom6_mpi_halo.o
 MPI_CUDA_MODULES = $(BUILDDIR)/mom6_mpi_domain.o $(BUILDDIR)/mom6_mpi_halo_cuda.o
@@ -137,13 +147,13 @@ CUDA_DRIVERS = $(BUILDDIR)/continuity_cuda_driver $(BUILDDIR)/coriolis_cuda_driv
                $(BUILDDIR)/barotropic_cuda_driver $(BUILDDIR)/vert_visc_cuda_driver \
                $(BUILDDIR)/hor_visc_cuda_driver $(BUILDDIR)/rk2_cuda_driver
 
-.PHONY: all single-gpu cuda cuda-c omp mpi mpi-cuda mpi-cuda-c mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
+.PHONY: all single-gpu cuda cuda-c omp mpi mpi-cuda mpi-cuda-c mpi-omp serial mpi-serial modules modules-cuda all-backends clean info small_scaling large_scaling plots
 
 # Default: build OpenMP target single-GPU driver
 all: omp
 
 # All backends (requires nvfortran for OpenACC and CUDA)
-all-backends: mpi mpi-cuda mpi-cuda-c mpi-omp
+all-backends: mpi mpi-cuda mpi-cuda-c mpi-omp serial mpi-serial
 
 # Single-GPU targets
 omp: $(BUILDDIR)/rk2_omp_driver
@@ -162,6 +172,11 @@ mpi: $(BUILDDIR)/rk2_mpi_driver
 mpi-cuda: $(BUILDDIR)/rk2_mpi_cuda_driver
 
 mpi-cuda-c: $(BUILDDIR)/rk2_mpi_cuda_c_driver
+
+# Serial CPU targets
+serial: $(BUILDDIR)/rk2_serial_driver
+
+mpi-serial: $(BUILDDIR)/rk2_mpi_serial_driver
 
 modules: $(MODULE_DRIVERS)
 
@@ -234,6 +249,39 @@ $(BUILDDIR)/mom6_mpi_halo_cuda.o: $(SRCDIR_CUDA)/mom6_mpi_halo_cuda.F90 $(BUILDD
 
 $(BUILDDIR)/rk2_mpi_omp_driver: $(APPDIR)/rk2_mpi_omp_driver.F90 $(COMMON_MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES)
 	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(OMP_MODULES) $(MPI_OMP_MODULES) $(LDFLAGS)
+
+#==============================================================================
+# Serial CPU module compilation (src/serial — no GPU directives)
+#==============================================================================
+
+$(BUILDDIR)/mom6_continuity_serial.o: $(SRCDIR_SERIAL)/mom6_continuity_serial.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_coriolis_serial.o: $(SRCDIR_SERIAL)/mom6_coriolis_serial.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_barotropic_serial.o: $(SRCDIR_SERIAL)/mom6_barotropic_serial.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_vert_visc_serial.o: $(SRCDIR_SERIAL)/mom6_vert_visc_serial.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_hor_visc_serial.o: $(SRCDIR_SERIAL)/mom6_hor_visc_serial.F90 $(BUILDDIR)/mom6_types.o
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+#==============================================================================
+# Serial CPU driver compilation
+#==============================================================================
+
+$(BUILDDIR)/rk2_serial_driver: $(APPDIR)/rk2_serial_driver.F90 $(COMMON_MODULES) $(SERIAL_MODULES)
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(SERIAL_MODULES) $(LDFLAGS)
+
+#==============================================================================
+# MPI + Serial CPU driver compilation
+#==============================================================================
+
+$(BUILDDIR)/rk2_mpi_serial_driver: $(APPDIR)/rk2_mpi_serial_driver.F90 $(COMMON_MODULES) $(SERIAL_MODULES) $(MPI_MODULES)
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(SERIAL_MODULES) $(MPI_MODULES) $(LDFLAGS)
 
 #==============================================================================
 # OpenACC module compilation (src/openacc — opt-in, requires nvfortran)
