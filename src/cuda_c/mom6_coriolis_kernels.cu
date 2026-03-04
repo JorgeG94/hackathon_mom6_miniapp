@@ -707,44 +707,4 @@ extern "C" void launch_coriolis_fused_sadourny_kernel(
         n1, n2, n3, is_l, ie_l, js_l, je_l);
 }
 
-// =========================================================================
-// CUDA runtime helpers (callable from Fortran via iso_c_binding)
-// These let Fortran manage GPU memory without cudafor.
-// =========================================================================
-
-extern "C" int cuda_device_synchronize_c(void)
-{
-    return (int)cudaDeviceSynchronize();
-}
-
-/// Allocate device memory, return pointer (NULL on failure).
-extern "C" void* cuda_malloc_c(size_t bytes)
-{
-    void* ptr = NULL;
-    cudaError_t err = cudaMalloc(&ptr, bytes);
-    return (err == cudaSuccess) ? ptr : NULL;
-}
-
-/// Free device memory.
-extern "C" void cuda_free_c(void* ptr)
-{
-    if (ptr) cudaFree(ptr);
-}
-
-/// Host → Device copy.
-extern "C" int cuda_memcpy_h2d_c(void* dst, const void* src, size_t bytes)
-{
-    return (int)cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
-}
-
-/// Device → Host copy.
-extern "C" int cuda_memcpy_d2h_c(void* dst, const void* src, size_t bytes)
-{
-    return (int)cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
-}
-
-/// Set device memory to zero.
-extern "C" int cuda_memset_c(void* ptr, int value, size_t bytes)
-{
-    return (int)cudaMemset(ptr, value, bytes);
-}
+// CUDA runtime helpers moved to cuda_helpers.cu

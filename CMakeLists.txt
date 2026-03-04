@@ -44,6 +44,7 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # =============================================================================
 
 option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_CUDA_C_KERNELS "Build CUDA C kernel variants (nvcc + any Fortran compiler)" OFF)
 option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
 option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" ON)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
@@ -55,6 +56,16 @@ if(MOM6_ENABLE_CUDA_KERNELS)
     message(FATAL_ERROR "MOM6_ENABLE_CUDA_KERNELS requires the NVHPC (nvfortran) compiler")
   endif()
   message(STATUS "CUDA Fortran kernels: ENABLED")
+endif()
+
+if(MOM6_ENABLE_CUDA_C_KERNELS)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  # Default to sm_70 (V100); override with -DCMAKE_CUDA_ARCHITECTURES=80 etc.
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52")
+    set(CMAKE_CUDA_ARCHITECTURES 70 CACHE STRING "CUDA architectures" FORCE)
+  endif()
+  message(STATUS "CUDA C kernels: ENABLED (nvcc + iso_c_binding, arch=${CMAKE_CUDA_ARCHITECTURES})")
 endif()
 
 if(MOM6_ENABLE_OPENACC_KERNELS)
@@ -86,7 +97,9 @@ set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
 endif()
-if(MOM6_ENABLE_OMP_KERNELS)
+# OMP target data management is needed for both OMP kernels and CUDA C
+# (the CUDA C driver uses !$omp target enter/exit data for state arrays)
+if(MOM6_ENABLE_OMP_KERNELS OR MOM6_ENABLE_CUDA_C_KERNELS)
   target_compile_definitions(mom6_modules PRIVATE USE_OMP_OFFLOAD)
 endif()
 target_include_directories(mom6_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
@@ -105,6 +118,14 @@ endif()
 
 if(MOM6_ENABLE_CUDA_KERNELS)
   add_subdirectory(src/cuda)
+endif()
+
+# =============================================================================
+# CUDA C kernel library (opt-in — nvcc for .cu, any Fortran for wrappers)
+# =============================================================================
+
+if(MOM6_ENABLE_CUDA_C_KERNELS)
+  add_subdirectory(src/cuda_c)
 endif()
 
 # =============================================================================
@@ -155,6 +176,16 @@ if(MOM6_ENABLE_SINGLE_GPU_DRIVERS)
         add_cuda_driver(${drv} app/module_drivers/${drv}.F90)
       endforeach()
     endif()
+  endif()
+
+  # CUDA C single-GPU driver (nvcc kernels + OMP target data management)
+  if(MOM6_ENABLE_CUDA_C_KERNELS)
+    add_executable(rk2_cuda_c_driver app/rk2_cuda_c_driver.F90)
+    target_link_libraries(rk2_cuda_c_driver PRIVATE
+      mom6_modules mom6_cuda_c_wrappers)
+    # Link cudart and stdc++ explicitly — CUDA::cudart causes warnings with nvfortran
+    target_link_options(rk2_cuda_c_driver PRIVATE
+      "-L${CUDAToolkit_LIBRARY_DIR}" "-lcudart" "-lstdc++")
   endif()
 
   # OpenMP single-GPU driver
@@ -251,6 +282,7 @@ message(
 message(STATUS "OpenMP target:    ${MOM6_ENABLE_OMP_KERNELS} (default backend)")
 message(STATUS "OpenACC kernels:  ${MOM6_ENABLE_OPENACC_KERNELS}")
 message(STATUS "CUDA kernels:     ${MOM6_ENABLE_CUDA_KERNELS}")
+message(STATUS "CUDA C kernels:   ${MOM6_ENABLE_CUDA_C_KERNELS}")
 message(STATUS "MPI parallel:     ${MOM6_ENABLE_MPI}")
 message(STATUS "Single-GPU:       ${MOM6_ENABLE_SINGLE_GPU_DRIVERS}")
 message(STATUS "Module drivers:   ${MOM6_ENABLE_MODULE_DRIVERS}")
