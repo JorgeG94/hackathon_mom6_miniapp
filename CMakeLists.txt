@@ -28,7 +28,7 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
   message(STATUS "Detected Intel Fortran compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -heap-arrays")
 
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Flang")
+elseif(CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
   message(STATUS "Detected Flang compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -fopenmp --offload-arch=gfx90a -fopenmp-offload-mandatory -fPIC")
 
@@ -43,9 +43,9 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # Build options
 # =============================================================================
 
-option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" ON)
+option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
 option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
-option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" OFF)
+option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" ON)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
 option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
 option(MOM6_ENABLE_MODULE_DRIVERS "Build individual module drivers (continuity, coriolis, etc.)" OFF)
@@ -67,8 +67,12 @@ endif()
 # =============================================================================
 # Module library (shared solvers — OpenMP default backend)
 # =============================================================================
-
-add_library(mom6_modules STATIC)
+if(CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
+  message(STATUS "To build on AMD the common modules need to be a shared library!")
+  add_library(mom6_modules SHARED)
+else()
+  add_library(mom6_modules STATIC)
+endif()
 add_subdirectory(src/common)
 
 # OpenMP is the default portable backend (works on AMD, Intel, NVIDIA)
