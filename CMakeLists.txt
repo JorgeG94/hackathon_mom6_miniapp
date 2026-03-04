@@ -17,7 +17,7 @@ endif()
 # Compiler-specific flags
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
-  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O2 -g -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
 
 elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
@@ -43,9 +43,9 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # Build options
 # =============================================================================
 
-option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" ON)
 option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
-option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" ON)
+option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" OFF)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
 option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
 option(MOM6_ENABLE_MODULE_DRIVERS "Build individual module drivers (continuity, coriolis, etc.)" OFF)
@@ -68,7 +68,7 @@ endif()
 # Module library (shared solvers — OpenMP default backend)
 # =============================================================================
 
-add_library(mom6_modules SHARED)
+add_library(mom6_modules STATIC)
 add_subdirectory(src/common)
 
 # OpenMP is the default portable backend (works on AMD, Intel, NVIDIA)
