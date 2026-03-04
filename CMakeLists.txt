@@ -82,6 +82,9 @@ set_target_properties(mom6_modules PROPERTIES Fortran_MODULE_DIRECTORY
 if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
   target_compile_definitions(mom6_modules PRIVATE USE_NVTX)
 endif()
+if(MOM6_ENABLE_OMP_KERNELS)
+  target_compile_definitions(mom6_modules PRIVATE USE_OMP_OFFLOAD)
+endif()
 target_include_directories(mom6_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
 
 # =============================================================================

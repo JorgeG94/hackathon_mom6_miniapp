@@ -23,6 +23,9 @@
 # Default compiler
 FC ?= gfortran
 
+# GPU backend: omp (default) or openacc (requires nvfortran, pass GPU_BACKEND=openacc)
+GPU_BACKEND ?= omp
+
 # Directories
 SRCDIR_COMMON  = src/common
 SRCDIR_OPENACC = src/openacc
@@ -60,6 +63,13 @@ else
   FFLAGS = -O3
   LDFLAGS =
   MODFLAG = -J
+endif
+
+# Preprocessor flags for GPU backend selection
+ifeq ($(GPU_BACKEND),omp)
+  CPPFLAGS = -DUSE_OMP_OFFLOAD
+else
+  CPPFLAGS =
 endif
 
 # MPI compiler wrapper (wraps FC)
@@ -142,7 +152,7 @@ $(BUILDDIR):
 #==============================================================================
 
 $(BUILDDIR)/mom6_types.o: $(SRCDIR_COMMON)/mom6_types.F90 | $(BUILDDIR)
-	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+	$(FC) $(FFLAGS) $(CPPFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 $(BUILDDIR)/mom6_profiler.o: $(SRCDIR_COMMON)/mom6_profiler.F90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
@@ -326,10 +336,12 @@ info:
 	@echo "========================================"
 	@echo "MOM6 Mini-Apps Build Configuration"
 	@echo "========================================"
-	@echo "Compiler: $(FC)"
-	@echo "FFLAGS:   $(FFLAGS)"
-	@echo "LDFLAGS:  $(LDFLAGS)"
+	@echo "Compiler:    $(FC)"
+	@echo "GPU backend: $(GPU_BACKEND)"
+	@echo "FFLAGS:      $(FFLAGS)"
+	@echo "CPPFLAGS:    $(CPPFLAGS)"
+	@echo "LDFLAGS:     $(LDFLAGS)"
 	@echo "========================================"
 	@echo "Default target: omp (OpenMP target offloading)"
-	@echo "OpenACC/CUDA targets require nvfortran"
+	@echo "For OpenACC: make GPU_BACKEND=openacc FC=nvfortran single-gpu"
 	@echo "========================================"

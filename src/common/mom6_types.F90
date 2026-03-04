@@ -233,6 +233,17 @@ contains
         G%nbytes = 29_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
 
         ! Copy grid to GPU
+#ifdef USE_OMP_OFFLOAD
+        !$omp target enter data map(to: G)
+        !$omp target enter data map(to: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
+        !$omp target enter data map(to: G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
+        !$omp target enter data map(to: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
+        !$omp target enter data map(to: G%IareaBu, G%areaBu, G%CoriolisBu)
+        !$omp target enter data map(to: G%IareaCu, G%IareaCv)
+        !$omp target enter data map(to: G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
+        !$omp target enter data map(to: G%bathyT)
+        !$omp target enter data map(to: G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+#else
         !$acc enter data copyin(G)
         !$acc enter data copyin(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$acc enter data copyin(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
@@ -242,6 +253,7 @@ contains
         !$acc enter data copyin(G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
         !$acc enter data copyin(G%bathyT)
         !$acc enter data copyin(G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+#endif
 
     end subroutine init_ocean_grid
 
@@ -249,6 +261,17 @@ contains
     subroutine end_ocean_grid(G)
         type(ocean_grid_type), intent(inout) :: G
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target exit data map(delete: G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
+        !$omp target exit data map(delete: G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
+        !$omp target exit data map(delete: G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
+        !$omp target exit data map(delete: G%IareaBu, G%areaBu, G%CoriolisBu)
+        !$omp target exit data map(delete: G%IareaCu, G%IareaCv)
+        !$omp target exit data map(delete: G%dxBu, G%dyBu, G%IdxBu, G%IdyBu)
+        !$omp target exit data map(delete: G%bathyT)
+        !$omp target exit data map(delete: G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
+        !$omp target exit data map(delete: G)
+#else
         !$acc exit data delete(G%IareaT, G%areaT, G%dxT, G%dyT, G%IdxT, G%IdyT)
         !$acc exit data delete(G%dxCu, G%dyCu, G%dy_Cu, G%IdxCu, G%IdyCu)
         !$acc exit data delete(G%dxCv, G%dyCv, G%IdxCv, G%IdyCv)
@@ -258,6 +281,7 @@ contains
         !$acc exit data delete(G%bathyT)
         !$acc exit data delete(G%mask2dT, G%mask2dBu, G%mask2dCu, G%mask2dCv)
         !$acc exit data delete(G)
+#endif
 
         if (allocated(G%IareaT)) deallocate (G%IareaT)
         if (allocated(G%areaT)) deallocate (G%areaT)
@@ -298,7 +322,11 @@ contains
         GV%ke = nk
         GV%Angstrom_H = 1.0e-10_dp
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target enter data map(to: GV)
+#else
         !$acc enter data copyin(GV)
+#endif
 
     end subroutine init_verticalGrid
 
@@ -324,10 +352,17 @@ contains
         BT_cont%nbytes = (6_int64 + int(nz, int64)) &
             * int(ied - isd + 1, int64) * int(jed - jsd + 1, int64) * 8_int64
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target enter data map(to: BT_cont)
+        !$omp target enter data map(to: BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
+        !$omp target enter data map(to: BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
+        !$omp target enter data map(to: BT_cont%h_u)
+#else
         !$acc enter data copyin(BT_cont)
         !$acc enter data copyin(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
         !$acc enter data copyin(BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
         !$acc enter data copyin(BT_cont%h_u)
+#endif
 
     end subroutine alloc_BT_cont_type
 
@@ -337,10 +372,17 @@ contains
 
         if (.not. associated(BT_cont)) return
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target exit data map(delete: BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
+        !$omp target exit data map(delete: BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
+        !$omp target exit data map(delete: BT_cont%h_u)
+        !$omp target exit data map(delete: BT_cont)
+#else
         !$acc exit data delete(BT_cont%FA_u_WW, BT_cont%FA_u_W0, BT_cont%FA_u_E0)
         !$acc exit data delete(BT_cont%FA_u_EE, BT_cont%uBT_WW, BT_cont%uBT_EE)
         !$acc exit data delete(BT_cont%h_u)
         !$acc exit data delete(BT_cont)
+#endif
 
         if (allocated(BT_cont%FA_u_WW)) deallocate (BT_cont%FA_u_WW)
         if (allocated(BT_cont%FA_u_W0)) deallocate (BT_cont%FA_u_W0)
@@ -365,8 +407,13 @@ contains
         ! Compute total bytes: 2 2D arrays of real(dp)
         forces%nbytes = 2_int64 * int(G%ied - G%isd + 1, int64) * int(G%jed - G%jsd + 1, int64) * 8_int64
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target enter data map(to: forces)
+        !$omp target enter data map(to: forces%taux, forces%tauy)
+#else
         !$acc enter data copyin(forces)
         !$acc enter data copyin(forces%taux, forces%tauy)
+#endif
 
     end subroutine init_mech_forcing
 
@@ -374,8 +421,13 @@ contains
     subroutine end_mech_forcing(forces)
         type(mech_forcing_type), intent(inout) :: forces
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target exit data map(delete: forces%taux, forces%tauy)
+        !$omp target exit data map(delete: forces)
+#else
         !$acc exit data delete(forces%taux, forces%tauy)
         !$acc exit data delete(forces)
+#endif
 
         if (allocated(forces%taux)) deallocate (forces%taux)
         if (allocated(forces%tauy)) deallocate (forces%tauy)
@@ -403,10 +455,17 @@ contains
                 * int(G%jed - G%jsd + 1, int64) * int(nz, int64) * 8_int64
         end if
 
+#ifdef USE_OMP_OFFLOAD
+        !$omp target enter data map(to: visc)
+        if (visc%has_Rayleigh) then
+            !$omp target enter data map(to: visc%Ray_u, visc%Ray_v)
+        end if
+#else
         !$acc enter data copyin(visc)
         if (visc%has_Rayleigh) then
             !$acc enter data copyin(visc%Ray_u, visc%Ray_v)
         end if
+#endif
 
     end subroutine init_vertvisc_visc
 
@@ -414,10 +473,17 @@ contains
     subroutine end_vertvisc_visc(visc)
         type(vertvisc_type), intent(inout) :: visc
 
+#ifdef USE_OMP_OFFLOAD
+        if (visc%has_Rayleigh) then
+            !$omp target exit data map(delete: visc%Ray_u, visc%Ray_v)
+        end if
+        !$omp target exit data map(delete: visc)
+#else
         if (visc%has_Rayleigh) then
             !$acc exit data delete(visc%Ray_u, visc%Ray_v)
         end if
         !$acc exit data delete(visc)
+#endif
 
         if (allocated(visc%Ray_u)) deallocate (visc%Ray_u)
         if (allocated(visc%Ray_v)) deallocate (visc%Ray_v)
