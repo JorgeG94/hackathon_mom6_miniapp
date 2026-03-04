@@ -18,6 +18,8 @@ make FC=nvfortran mpi-cuda                        # CUDA + MPI
 make FC=nvfortran mpi-cuda-c                      # CUDA C + MPI
 make FC=gfortran                                  # OpenMP (default, also works with ifx, amdflang)
 make FC=gfortran mpi-omp                          # OpenMP + MPI
+make FC=gfortran serial                            # Pure CPU serial (no GPU, baseline)
+make FC=gfortran mpi-serial                        # Serial CPU + MPI
 make clean                                        # Remove build/
 ```
 
@@ -30,7 +32,9 @@ OpenACC and CUDA require `nvfortran`. OpenMP works with gfortran, ifx, amdflang.
 ./build/rk2_omp_driver              # Single-GPU OpenMP
 ./build/rk2_driver                  # Single-GPU OpenACC
 ./build/rk2_cuda_driver             # Single-GPU CUDA
+./build/rk2_serial_driver           # Pure CPU serial (baseline)
 mpirun -np 4 ./build/rk2_mpi_driver # 4-GPU MPI+OpenACC
+mpirun -np 4 ./build/rk2_mpi_serial_driver # MPI serial CPU
 ```
 
 Default grid: 180x180x75, 10 iterations, dt=300s, 30 barotropic substeps.
@@ -51,11 +55,14 @@ src/common/          Shared infrastructure (all backends)
   mom6_mpi_halo.F90    Halo exchange (OpenACC, host-staging or GPU-aware MPI)
 
 src/openacc/         OpenACC physics (nvfortran only)
-  mom6_continuity.F90 + mom6_continuity_adjust.F90  (PPM continuity, submodule at -O1)
   mom6_coriolis.F90        Coriolis + KE gradient
   mom6_barotropic.F90      Barotropic substep solver
   mom6_vert_visc.F90       Vertical viscosity (tridiagonal)
   mom6_hor_visc.F90        Horizontal viscosity (Laplacian/biharmonic/Smagorinsky)
+
+src/serial/          Pure CPU serial physics (no GPU directives, baseline)
+  5 physics modules with _serial suffix (continuity, coriolis, barotropic, vert_visc, hor_visc)
+  Includes split barotropic API and combined vert_visc_coef_apply for MPI driver
 
 src/openmp/          OpenMP target offloading physics (portable: nvidia/amd/intel)
   Same 6 modules as openacc/ with _omp suffix
@@ -74,6 +81,8 @@ app/                 Drivers
   rk2_mpi_omp_driver.F90   Multi-GPU MPI+OpenMP
   rk2_mpi_cuda_driver.F90   Multi-GPU MPI+CUDA
   rk2_mpi_cuda_c_driver.F90 Multi-GPU MPI+CUDA C
+  rk2_serial_driver.F90      Single-node pure CPU serial
+  rk2_mpi_serial_driver.F90  Multi-node MPI+serial CPU
   module_drivers/           Per-kernel standalone benchmark drivers
 
 scripts/             Benchmark/scaling scripts + plotting
@@ -161,7 +170,6 @@ The `#ifdef USE_OMP_OFFLOAD` preprocessor guard in `mom6_types.F90` switches bet
 - Common modules: compiled with `$(FC)`
 - MPI modules: compiled with `$(MPI_FC)` (mpif90 wrapper)
 - CUDA modules: need `-cuda` flag
-- `mom6_continuity_adjust` (submodule): compiled at `-O1` to avoid nvfortran codegen bug
 - Module dependency order: types → profiler → diag → physics → drivers
 
 ## Known Quirks

@@ -46,6 +46,7 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
 option(MOM6_ENABLE_CUDA_C_KERNELS "Build CUDA C kernel variants (nvcc + any Fortran compiler)" OFF)
 option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
+option(MOM6_ENABLE_SERIAL_KERNELS "Build pure CPU serial kernel variants (no GPU)" OFF)
 option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (default backend)" ON)
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
 option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
@@ -103,6 +104,26 @@ if(MOM6_ENABLE_OMP_KERNELS OR MOM6_ENABLE_CUDA_C_KERNELS)
   target_compile_definitions(mom6_modules PRIVATE USE_OMP_OFFLOAD)
 endif()
 target_include_directories(mom6_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
+
+# =============================================================================
+# Serial CPU kernel library (no GPU directives)
+# =============================================================================
+
+if(MOM6_ENABLE_SERIAL_KERNELS)
+  message(STATUS "Serial CPU kernels: ENABLED")
+
+  add_library(mom6_serial_modules STATIC
+    src/serial/mom6_continuity_serial.F90
+    src/serial/mom6_coriolis_serial.F90
+    src/serial/mom6_barotropic_serial.F90
+    src/serial/mom6_vert_visc_serial.F90
+    src/serial/mom6_hor_visc_serial.F90)
+
+  set_target_properties(mom6_serial_modules PROPERTIES
+    Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod)
+  target_include_directories(mom6_serial_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
+  target_link_libraries(mom6_serial_modules PUBLIC mom6_modules)
+endif()
 
 # =============================================================================
 # OpenACC kernel library (opt-in, requires NVHPC)
@@ -193,6 +214,12 @@ if(MOM6_ENABLE_SINGLE_GPU_DRIVERS)
     add_executable(rk2_omp_driver app/rk2_omp_driver.F90)
     target_link_libraries(rk2_omp_driver PRIVATE mom6_modules mom6_omp_modules)
   endif()
+
+  # Serial CPU single-node driver
+  if(MOM6_ENABLE_SERIAL_KERNELS)
+    add_executable(rk2_serial_driver app/rk2_serial_driver.F90)
+    target_link_libraries(rk2_serial_driver PRIVATE mom6_modules mom6_serial_modules)
+  endif()
 endif()
 
 # =============================================================================
@@ -256,6 +283,13 @@ if(MOM6_ENABLE_MPI)
       mom6_modules mom6_omp_modules mom6_mpi_modules mom6_mpi_omp_modules MPI::MPI_Fortran)
   endif()
 
+  # Serial CPU MPI (requires MPI and serial kernels)
+  if(MOM6_ENABLE_SERIAL_KERNELS)
+    add_executable(rk2_mpi_serial_driver app/rk2_mpi_serial_driver.F90)
+    target_link_libraries(rk2_mpi_serial_driver PRIVATE
+      mom6_modules mom6_serial_modules mom6_mpi_modules MPI::MPI_Fortran)
+  endif()
+
   # CUDA C MPI (requires both MPI and CUDA C kernels + OMP halo exchange)
   if(MOM6_ENABLE_CUDA_C_KERNELS)
     # Needs OMP halo exchange library — build it if not already built
@@ -303,6 +337,7 @@ message(
 message(STATUS "OpenMP target:    ${MOM6_ENABLE_OMP_KERNELS} (default backend)")
 message(STATUS "OpenACC kernels:  ${MOM6_ENABLE_OPENACC_KERNELS}")
 message(STATUS "CUDA kernels:     ${MOM6_ENABLE_CUDA_KERNELS}")
+message(STATUS "Serial CPU:       ${MOM6_ENABLE_SERIAL_KERNELS}")
 message(STATUS "CUDA C kernels:   ${MOM6_ENABLE_CUDA_C_KERNELS}")
 message(STATUS "MPI parallel:     ${MOM6_ENABLE_MPI}")
 message(STATUS "Single-GPU:       ${MOM6_ENABLE_SINGLE_GPU_DRIVERS}")
