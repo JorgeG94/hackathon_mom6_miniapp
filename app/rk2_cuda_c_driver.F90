@@ -11,7 +11,7 @@ program rk2_cuda_c_driver
     use cudafor
     use omp_lib, only: omp_get_wtime
     use iso_fortran_env, only: dp => real64, int64
-    use iso_c_binding, only: c_ptr, c_devloc => c_devloc
+    use iso_c_binding, only: c_ptr
     use mom6_types, only: ocean_grid_type, verticalGrid_type, &
                           G_EARTH, PI, OMEGA, EARTH_RADIUS
     use mom6_profiler, only: profiler_init, profiler_end, profiler_start, profiler_stop, &
