@@ -16,6 +16,7 @@ module mom6_barotropic_cuda_c
 
     public :: btstep_cuda_c, barotropic_init_cuda_c, barotropic_end_cuda_c
     public :: btstep_cuda_c_init_state, btstep_cuda_c_do_step, btstep_cuda_c_get_output
+    public :: btstep_cuda_c_export_state, btstep_cuda_c_import_state
     public :: barotropic_CS_cuda_c
 
     !> Control structure — all device pointers are opaque type(c_ptr)
@@ -587,6 +588,40 @@ contains
         istat = cuda_device_synchronize_c()
 
     end subroutine btstep_cuda_c_get_output
+
+    ! =====================================================================
+    ! Export internal state to external device pointers (for MPI halo exchange)
+    ! =====================================================================
+    subroutine btstep_cuda_c_export_state(CS, ubt_ext, vbt_ext, eta_ext)
+        type(barotropic_CS_cuda_c), intent(in) :: CS
+        type(c_ptr), intent(in) :: ubt_ext, vbt_ext, eta_ext
+
+        integer(c_size_t) :: nbytes
+        integer(c_int) :: ierr
+
+        nbytes = int(CS%ied - CS%isd + 1, c_size_t) * &
+                 int(CS%jed - CS%jsd + 1, c_size_t) * 8_c_size_t
+        ierr = cuda_memcpy_d2d_c(ubt_ext, CS%ubt, nbytes)
+        ierr = cuda_memcpy_d2d_c(vbt_ext, CS%vbt, nbytes)
+        ierr = cuda_memcpy_d2d_c(eta_ext, CS%eta, nbytes)
+    end subroutine btstep_cuda_c_export_state
+
+    ! =====================================================================
+    ! Import external device pointers back to internal state (after halo exchange)
+    ! =====================================================================
+    subroutine btstep_cuda_c_import_state(CS, ubt_ext, vbt_ext, eta_ext)
+        type(barotropic_CS_cuda_c), intent(inout) :: CS
+        type(c_ptr), intent(in) :: ubt_ext, vbt_ext, eta_ext
+
+        integer(c_size_t) :: nbytes
+        integer(c_int) :: ierr
+
+        nbytes = int(CS%ied - CS%isd + 1, c_size_t) * &
+                 int(CS%jed - CS%jsd + 1, c_size_t) * 8_c_size_t
+        ierr = cuda_memcpy_d2d_c(CS%ubt, ubt_ext, nbytes)
+        ierr = cuda_memcpy_d2d_c(CS%vbt, vbt_ext, nbytes)
+        ierr = cuda_memcpy_d2d_c(CS%eta, eta_ext, nbytes)
+    end subroutine btstep_cuda_c_import_state
 
     ! =====================================================================
     ! End — free all device memory

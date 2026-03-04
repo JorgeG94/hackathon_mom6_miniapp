@@ -12,6 +12,7 @@
 #   make cuda         - Build build/rk2_cuda_driver (CUDA, single GPU, requires nvfortran)
 #   make cuda-c       - Build build/rk2_cuda_c_driver (CUDA C kernels + nvfortran driver)
 #   make mpi-cuda     - Build build/rk2_mpi_cuda_driver (CUDA + MPI, requires nvfortran)
+#   make mpi-cuda-c   - Build build/rk2_mpi_cuda_c_driver (CUDA C kernels + MPI)
 #   make modules      - Build all 5 OpenACC module drivers into build/
 #   make modules-cuda - Build all 6 CUDA module drivers into build/
 #   make all-backends - Build all MPI drivers (OpenACC, CUDA, OpenMP target)
@@ -136,13 +137,13 @@ CUDA_DRIVERS = $(BUILDDIR)/continuity_cuda_driver $(BUILDDIR)/coriolis_cuda_driv
                $(BUILDDIR)/barotropic_cuda_driver $(BUILDDIR)/vert_visc_cuda_driver \
                $(BUILDDIR)/hor_visc_cuda_driver $(BUILDDIR)/rk2_cuda_driver
 
-.PHONY: all single-gpu cuda cuda-c omp mpi mpi-cuda mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
+.PHONY: all single-gpu cuda cuda-c omp mpi mpi-cuda mpi-cuda-c mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
 
 # Default: build OpenMP target single-GPU driver
 all: omp
 
 # All backends (requires nvfortran for OpenACC and CUDA)
-all-backends: mpi mpi-cuda mpi-omp
+all-backends: mpi mpi-cuda mpi-cuda-c mpi-omp
 
 # Single-GPU targets
 omp: $(BUILDDIR)/rk2_omp_driver
@@ -159,6 +160,8 @@ mpi-omp: $(BUILDDIR)/rk2_mpi_omp_driver
 mpi: $(BUILDDIR)/rk2_mpi_driver
 
 mpi-cuda: $(BUILDDIR)/rk2_mpi_cuda_driver
+
+mpi-cuda-c: $(BUILDDIR)/rk2_mpi_cuda_c_driver
 
 modules: $(MODULE_DRIVERS)
 
@@ -378,6 +381,10 @@ $(BUILDDIR)/mom6_continuity_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_continuity_cuda_c.F9
 # No OMP physics modules needed — all physics use CUDA C kernels
 $(BUILDDIR)/rk2_cuda_c_driver: $(APPDIR)/rk2_cuda_c_driver.F90 $(COMMON_MODULES) $(CUDA_C_MODULES)
 	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(CUDA_C_MODULES) $(LDFLAGS) -lstdc++ -lcudart
+
+# MPI + CUDA C driver: OMP target for data mgmt + CUDA C kernels + MPI halo exchange
+$(BUILDDIR)/rk2_mpi_cuda_c_driver: $(APPDIR)/rk2_mpi_cuda_c_driver.F90 $(COMMON_MODULES) $(CUDA_C_MODULES) $(MPI_OMP_MODULES)
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(CUDA_C_MODULES) $(MPI_OMP_MODULES) $(LDFLAGS) -lstdc++ -lcudart
 
 #==============================================================================
 # MPI + CUDA driver compilation (requires nvfortran)

@@ -12,9 +12,16 @@ module mom6_cuda_c_common
 
     public :: gpu_alloc, alloc_copy_2d, alloc_copy_3d, alloc_zero_3d, alloc_zero_2d
     public :: cuda_malloc_c, cuda_free_c, cuda_memcpy_h2d_c, cuda_memcpy_d2h_c
-    public :: cuda_memset_c, cuda_device_synchronize_c
+    public :: cuda_memcpy_d2d_c, cuda_memset_c
+    public :: cuda_set_device_c, cuda_device_synchronize_c
 
     interface
+        function cuda_set_device_c(device) result(ierr) bind(c, name='cuda_set_device_c')
+            import :: c_int
+            integer(c_int), value :: device
+            integer(c_int) :: ierr
+        end function
+
         function cuda_malloc_c(bytes) result(ptr) bind(c, name='cuda_malloc_c')
             import :: c_ptr, c_size_t
             integer(c_size_t), value :: bytes
@@ -34,6 +41,13 @@ module mom6_cuda_c_common
         end function
 
         function cuda_memcpy_d2h_c(dst, src, bytes) result(ierr) bind(c, name='cuda_memcpy_d2h_c')
+            import :: c_ptr, c_int, c_size_t
+            type(c_ptr), value :: dst, src
+            integer(c_size_t), value :: bytes
+            integer(c_int) :: ierr
+        end function
+
+        function cuda_memcpy_d2d_c(dst, src, bytes) result(ierr) bind(c, name='cuda_memcpy_d2d_c')
             import :: c_ptr, c_int, c_size_t
             type(c_ptr), value :: dst, src
             integer(c_size_t), value :: bytes

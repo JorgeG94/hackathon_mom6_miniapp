@@ -255,6 +255,27 @@ if(MOM6_ENABLE_MPI)
     target_link_libraries(rk2_mpi_omp_driver PRIVATE
       mom6_modules mom6_omp_modules mom6_mpi_modules mom6_mpi_omp_modules MPI::MPI_Fortran)
   endif()
+
+  # CUDA C MPI (requires both MPI and CUDA C kernels + OMP halo exchange)
+  if(MOM6_ENABLE_CUDA_C_KERNELS)
+    # Needs OMP halo exchange library — build it if not already built
+    if(NOT TARGET mom6_mpi_omp_modules)
+      add_library(mom6_mpi_omp_modules STATIC
+        src/openmp/mom6_mpi_halo_omp.F90)
+
+      set_target_properties(mom6_mpi_omp_modules PROPERTIES
+        Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod)
+      target_include_directories(mom6_mpi_omp_modules PUBLIC ${CMAKE_BINARY_DIR}/mod)
+      target_link_libraries(mom6_mpi_omp_modules PUBLIC mom6_mpi_modules MPI::MPI_Fortran)
+    endif()
+
+    # CUDA C MPI driver
+    add_executable(rk2_mpi_cuda_c_driver app/rk2_mpi_cuda_c_driver.F90)
+    target_link_libraries(rk2_mpi_cuda_c_driver PRIVATE
+      mom6_modules mom6_cuda_c_wrappers mom6_mpi_modules mom6_mpi_omp_modules MPI::MPI_Fortran)
+    target_link_options(rk2_mpi_cuda_c_driver PRIVATE
+      "-L${CUDAToolkit_LIBRARY_DIR}" "-lcudart" "-lstdc++")
+  endif()
 endif()
 
 # =============================================================================

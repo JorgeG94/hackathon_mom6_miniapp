@@ -5,6 +5,11 @@
 #include <cuda_runtime.h>
 #include "cuda_helpers.h"
 
+extern "C" int cuda_set_device_c(int device)
+{
+    return (int)cudaSetDevice(device);
+}
+
 extern "C" int cuda_device_synchronize_c(void)
 {
     return (int)cudaDeviceSynchronize();
@@ -30,6 +35,11 @@ extern "C" int cuda_memcpy_h2d_c(void* dst, const void* src, size_t bytes)
 extern "C" int cuda_memcpy_d2h_c(void* dst, const void* src, size_t bytes)
 {
     return (int)cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+}
+
+extern "C" int cuda_memcpy_d2d_c(void* dst, const void* src, size_t bytes)
+{
+    return (int)cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToDevice);
 }
 
 extern "C" int cuda_memset_c(void* ptr, int value, size_t bytes)
