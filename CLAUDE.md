@@ -15,6 +15,7 @@ source env.sh                              # nvfortran + MPI on PATH
 make FC=nvfortran GPU_BACKEND=openacc single-gpu  # OpenACC single-GPU
 make FC=nvfortran GPU_BACKEND=openacc mpi         # OpenACC + MPI
 make FC=nvfortran mpi-cuda                        # CUDA + MPI
+make FC=nvfortran mpi-cuda-c                      # CUDA C + MPI
 make FC=gfortran                                  # OpenMP (default, also works with ifx, amdflang)
 make FC=gfortran mpi-omp                          # OpenMP + MPI
 make clean                                        # Remove build/
@@ -71,7 +72,8 @@ app/                 Drivers
   rk2_cuda_driver.F90      Single-GPU CUDA
   rk2_mpi_driver.F90       Multi-GPU MPI+OpenACC
   rk2_mpi_omp_driver.F90   Multi-GPU MPI+OpenMP
-  rk2_mpi_cuda_driver.F90  Multi-GPU MPI+CUDA
+  rk2_mpi_cuda_driver.F90   Multi-GPU MPI+CUDA
+  rk2_mpi_cuda_c_driver.F90 Multi-GPU MPI+CUDA C
   module_drivers/           Per-kernel standalone benchmark drivers
 
 scripts/             Benchmark/scaling scripts + plotting

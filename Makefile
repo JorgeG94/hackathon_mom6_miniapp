@@ -10,7 +10,9 @@
 #   make single-gpu   - Build build/rk2_driver (OpenACC, single GPU, requires nvfortran)
 #   make mpi          - Build build/rk2_mpi_driver (OpenACC + MPI, requires nvfortran)
 #   make cuda         - Build build/rk2_cuda_driver (CUDA, single GPU, requires nvfortran)
+#   make cuda-c       - Build build/rk2_cuda_c_driver (CUDA C kernels + nvfortran driver)
 #   make mpi-cuda     - Build build/rk2_mpi_cuda_driver (CUDA + MPI, requires nvfortran)
+#   make mpi-cuda-c   - Build build/rk2_mpi_cuda_c_driver (CUDA C kernels + MPI)
 #   make modules      - Build all 5 OpenACC module drivers into build/
 #   make modules-cuda - Build all 6 CUDA module drivers into build/
 #   make all-backends - Build all MPI drivers (OpenACC, CUDA, OpenMP target)
@@ -31,6 +33,7 @@ SRCDIR_COMMON  = src/common
 SRCDIR_OPENACC = src/openacc
 SRCDIR_CUDA    = src/cuda
 SRCDIR_OPENMP  = src/openmp
+SRCDIR_CUDA_C  = src/cuda_c
 APPDIR   = app
 BUILDDIR = build
 
@@ -75,6 +78,12 @@ endif
 # MPI compiler wrapper (wraps FC)
 MPI_FC = mpif90
 
+# CUDA C compiler (for .cu files)
+NVCC ?= nvcc
+NVCC_FLAGS = -O3 -I $(SRCDIR_CUDA_C)
+# Auto-detect GPU architecture if possible; default to sm_80
+NVCC_ARCH ?= -arch=sm_70
+
 # Module include path
 MODFLAGS = -I$(BUILDDIR)
 
@@ -97,11 +106,21 @@ OMP_MODULES = $(BUILDDIR)/mom6_continuity_omp.o $(BUILDDIR)/mom6_continuity_adju
               $(BUILDDIR)/mom6_vert_visc_omp.o $(BUILDDIR)/mom6_hor_visc_omp.o
 
 # CUDA kernel objects (opt-in, requires nvfortran)
-CUDA_MODULES = $(BUILDDIR)/mom6_coriolis_cuda.o \
+CUDA_MODULES = $(BUILDDIR)/cuda_workspace.o \
+               $(BUILDDIR)/mom6_coriolis_cuda.o \
                $(BUILDDIR)/mom6_vert_visc_cuda.o \
                $(BUILDDIR)/mom6_barotropic_cuda.o \
                $(BUILDDIR)/mom6_hor_visc_cuda.o \
                $(BUILDDIR)/mom6_continuity_cuda.o
+
+# CUDA C kernel objects (nvcc compiled .cu + Fortran wrappers)
+CUDA_C_COMMON = $(BUILDDIR)/cuda_helpers.o $(BUILDDIR)/mom6_cuda_c_common.o
+CUDA_C_MODULES = $(CUDA_C_COMMON) \
+                 $(BUILDDIR)/mom6_coriolis_kernels.o $(BUILDDIR)/mom6_coriolis_cuda_c.o \
+                 $(BUILDDIR)/mom6_hor_visc_kernels.o $(BUILDDIR)/mom6_hor_visc_cuda_c.o \
+                 $(BUILDDIR)/mom6_vert_visc_kernels.o $(BUILDDIR)/mom6_vert_visc_cuda_c.o \
+                 $(BUILDDIR)/mom6_barotropic_kernels.o $(BUILDDIR)/mom6_barotropic_cuda_c.o \
+                 $(BUILDDIR)/mom6_continuity_kernels.o $(BUILDDIR)/mom6_continuity_cuda_c.o
 
 # MPI module objects
 MPI_MODULES = $(BUILDDIR)/mom6_mpi_domain.o $(BUILDDIR)/mom6_mpi_halo.o
@@ -118,13 +137,13 @@ CUDA_DRIVERS = $(BUILDDIR)/continuity_cuda_driver $(BUILDDIR)/coriolis_cuda_driv
                $(BUILDDIR)/barotropic_cuda_driver $(BUILDDIR)/vert_visc_cuda_driver \
                $(BUILDDIR)/hor_visc_cuda_driver $(BUILDDIR)/rk2_cuda_driver
 
-.PHONY: all single-gpu cuda omp mpi mpi-cuda mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
+.PHONY: all single-gpu cuda cuda-c omp mpi mpi-cuda mpi-cuda-c mpi-omp modules modules-cuda all-backends clean info small_scaling large_scaling plots
 
 # Default: build OpenMP target single-GPU driver
 all: omp
 
 # All backends (requires nvfortran for OpenACC and CUDA)
-all-backends: mpi mpi-cuda mpi-omp
+all-backends: mpi mpi-cuda mpi-cuda-c mpi-omp
 
 # Single-GPU targets
 omp: $(BUILDDIR)/rk2_omp_driver
@@ -133,12 +152,16 @@ single-gpu: $(BUILDDIR)/rk2_driver
 
 cuda: $(BUILDDIR)/rk2_cuda_driver
 
+cuda-c: $(BUILDDIR)/rk2_cuda_c_driver
+
 # MPI targets
 mpi-omp: $(BUILDDIR)/rk2_mpi_omp_driver
 
 mpi: $(BUILDDIR)/rk2_mpi_driver
 
 mpi-cuda: $(BUILDDIR)/rk2_mpi_cuda_driver
+
+mpi-cuda-c: $(BUILDDIR)/rk2_mpi_cuda_c_driver
 
 modules: $(MODULE_DRIVERS)
 
@@ -267,7 +290,10 @@ $(BUILDDIR)/rk2_mpi_driver: $(APPDIR)/rk2_mpi_driver.F90 $(COMMON_MODULES) $(OPE
 # CUDA Fortran kernel compilation (nvfortran only, -cuda flag)
 #==============================================================================
 
-$(BUILDDIR)/mom6_coriolis_cuda.o: $(SRCDIR_CUDA)/mom6_coriolis_cuda.F90 | $(BUILDDIR)
+$(BUILDDIR)/cuda_workspace.o: $(SRCDIR_CUDA)/cuda_workspace.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+$(BUILDDIR)/mom6_coriolis_cuda.o: $(SRCDIR_CUDA)/mom6_coriolis_cuda.F90 $(BUILDDIR)/cuda_workspace.o | $(BUILDDIR)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
 
 $(BUILDDIR)/mom6_vert_visc_cuda.o: $(SRCDIR_CUDA)/mom6_vert_visc_cuda.F90 | $(BUILDDIR)
@@ -303,6 +329,62 @@ $(BUILDDIR)/hor_visc_cuda_driver: $(APPDIR)/hor_visc_cuda_driver.F90 $(BUILDDIR)
 
 $(BUILDDIR)/rk2_cuda_driver: $(APPDIR)/rk2_cuda_driver.F90 $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES)
 	$(FC) $(FFLAGS) -cuda $(MODFLAGS) -o $@ $< $(BUILDDIR)/mom6_types.o $(BUILDDIR)/mom6_profiler.o $(BUILDDIR)/mom6_barotropic.o $(BUILDDIR)/mom6_hor_visc.o $(CUDA_MODULES) $(LDFLAGS) -cuda
+
+#==============================================================================
+# CUDA C kernel compilation (nvcc for .cu, any Fortran for .F90 wrapper)
+#==============================================================================
+
+# Shared CUDA C helpers (.cu -> .o via nvcc)
+$(BUILDDIR)/cuda_helpers.o: $(SRCDIR_CUDA_C)/cuda_helpers.cu $(SRCDIR_CUDA_C)/cuda_helpers.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+# Shared Fortran common module (interfaces + alloc helpers)
+$(BUILDDIR)/mom6_cuda_c_common.o: $(SRCDIR_CUDA_C)/mom6_cuda_c_common.F90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# Coriolis CUDA C kernels
+$(BUILDDIR)/mom6_coriolis_kernels.o: $(SRCDIR_CUDA_C)/mom6_coriolis_kernels.cu $(SRCDIR_CUDA_C)/mom6_cuda_common.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+$(BUILDDIR)/mom6_coriolis_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_coriolis_cuda_c.F90 $(BUILDDIR)/mom6_cuda_c_common.o | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# Horizontal viscosity CUDA C kernels
+$(BUILDDIR)/mom6_hor_visc_kernels.o: $(SRCDIR_CUDA_C)/mom6_hor_visc_kernels.cu $(SRCDIR_CUDA_C)/mom6_cuda_common.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+$(BUILDDIR)/mom6_hor_visc_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_hor_visc_cuda_c.F90 $(BUILDDIR)/mom6_cuda_c_common.o | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# Vertical viscosity CUDA C kernels
+$(BUILDDIR)/mom6_vert_visc_kernels.o: $(SRCDIR_CUDA_C)/mom6_vert_visc_kernels.cu $(SRCDIR_CUDA_C)/mom6_cuda_common.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+$(BUILDDIR)/mom6_vert_visc_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_vert_visc_cuda_c.F90 $(BUILDDIR)/mom6_cuda_c_common.o | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# Barotropic CUDA C kernels
+$(BUILDDIR)/mom6_barotropic_kernels.o: $(SRCDIR_CUDA_C)/mom6_barotropic_kernels.cu $(SRCDIR_CUDA_C)/mom6_cuda_common.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+$(BUILDDIR)/mom6_barotropic_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_barotropic_cuda_c.F90 $(BUILDDIR)/mom6_cuda_c_common.o | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# Continuity CUDA C kernels
+$(BUILDDIR)/mom6_continuity_kernels.o: $(SRCDIR_CUDA_C)/mom6_continuity_kernels.cu $(SRCDIR_CUDA_C)/mom6_cuda_common.h | $(BUILDDIR)
+	$(NVCC) $(NVCC_FLAGS) $(NVCC_ARCH) -c $< -o $@
+
+$(BUILDDIR)/mom6_continuity_cuda_c.o: $(SRCDIR_CUDA_C)/mom6_continuity_cuda_c.F90 $(BUILDDIR)/mom6_cuda_c_common.o | $(BUILDDIR)
+	$(FC) $(FFLAGS) $(MODFLAGS) -c $< -o $@ $(MODFLAG) $(BUILDDIR)
+
+# CUDA C driver: OMP target for data mgmt + CUDA C kernels for all physics
+# No OMP physics modules needed — all physics use CUDA C kernels
+$(BUILDDIR)/rk2_cuda_c_driver: $(APPDIR)/rk2_cuda_c_driver.F90 $(COMMON_MODULES) $(CUDA_C_MODULES)
+	$(FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(CUDA_C_MODULES) $(LDFLAGS) -lstdc++ -lcudart
+
+# MPI + CUDA C driver: OMP target for data mgmt + CUDA C kernels + MPI halo exchange
+$(BUILDDIR)/rk2_mpi_cuda_c_driver: $(APPDIR)/rk2_mpi_cuda_c_driver.F90 $(COMMON_MODULES) $(CUDA_C_MODULES) $(MPI_OMP_MODULES)
+	$(MPI_FC) $(FFLAGS) $(MODFLAGS) -o $@ $< $(COMMON_MODULES) $(CUDA_C_MODULES) $(MPI_OMP_MODULES) $(LDFLAGS) -lstdc++ -lcudart
 
 #==============================================================================
 # MPI + CUDA driver compilation (requires nvfortran)
