@@ -46,7 +46,7 @@ else ifneq (,$(findstring gfortran,$(FC)))
   MODFLAG = -J
 else ifneq (,$(findstring ifx,$(FC)))
   # Intel ifx
-  FFLAGS = -O3 -heap-arrays
+  FFLAGS = -O3 -heap-arrays -fiopenmp -fopenmp-targets=spir64
   LDFLAGS =
   MODFLAG = -module
 else ifneq (,$(findstring amdflang,$(FC)))
