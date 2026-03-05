@@ -43,6 +43,7 @@ message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
 # Build options
 # =============================================================================
 
+option(MOM6_ENABLE_ALL "Build all backends for super duper benchmarking" OFF)
 option(MOM6_ENABLE_CUDA_KERNELS "Build CUDA Fortran kernel variants (requires NVHPC)" OFF)
 option(MOM6_ENABLE_CUDA_C_KERNELS "Build CUDA C kernel variants (nvcc + any Fortran compiler)" OFF)
 option(MOM6_ENABLE_OPENACC_KERNELS "Build OpenACC kernel variants (requires NVHPC)" OFF)
@@ -51,6 +52,17 @@ option(MOM6_ENABLE_OMP_KERNELS "Build OpenMP target offloading kernel variants (
 option(MOM6_ENABLE_MPI "Build MPI-parallel drivers (requires MPI Fortran)" OFF)
 option(MOM6_ENABLE_SINGLE_GPU_DRIVERS "Build single-GPU drivers (rk2_driver, rk2_cuda_driver, rk2_omp_driver)" ON)
 option(MOM6_ENABLE_MODULE_DRIVERS "Build individual module drivers (continuity, coriolis, etc.)" OFF)
+
+if(MOM6_ENABLE_ALL) 
+  set(MOM6_ENABLE_CUDA_KERNELS ON)
+  set(MOM6_ENABLE_CUDA_C_KERNELS ON)
+  set(MOM6_ENABLE_OPENACC_KERNELS ON)
+  set(MOM6_ENABLE_SERIAL_KERNELS ON)
+  set(MOM6_ENABLE_OMP_KERNELS ON)
+  set(MOM6_ENABLE_MPI ON)
+  set(MOM6_ENABLE_SINGLE_GPU_DRIVERS ON)
+  set(MOM6_ENABLE_MODULE_DRIVERS ON)
+endif()
 
 if(MOM6_ENABLE_CUDA_KERNELS)
   if(NOT CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
@@ -138,7 +150,7 @@ endif()
 # =============================================================================
 
 if(MOM6_ENABLE_CUDA_KERNELS)
-  add_subdirectory(src/cuda)
+  add_subdirectory(src/cudafor)
 endif()
 
 # =============================================================================
@@ -250,7 +262,7 @@ if(MOM6_ENABLE_MPI)
   if(MOM6_ENABLE_CUDA_KERNELS)
     # CUDA MPI halo exchange library
     add_library(mom6_mpi_cuda_modules STATIC
-      src/cuda/mom6_mpi_halo_cuda.F90)
+      src/cudafor/mom6_mpi_halo_cuda.F90)
 
     set_target_properties(mom6_mpi_cuda_modules PROPERTIES
       Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod)
