@@ -297,9 +297,33 @@ if(MOM6_ENABLE_MPI)
 
   # Serial CPU MPI (requires MPI and serial kernels)
   if(MOM6_ENABLE_SERIAL_KERNELS)
+    # Serial CPU MPI infrastructure — no GPU directives
+    add_library(mom6_mpi_serial_infra STATIC
+      src/common/mom6_mpi_domain.F90
+      src/serial/mom6_mpi_halo_serial.F90)
+
+    set_target_properties(mom6_mpi_serial_infra PROPERTIES
+      Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/mod_serial_mpi)
+    target_include_directories(mom6_mpi_serial_infra PUBLIC
+      ${CMAKE_BINARY_DIR}/mod_serial_mpi ${CMAKE_BINARY_DIR}/mod)
+    target_link_libraries(mom6_mpi_serial_infra PUBLIC mom6_modules MPI::MPI_Fortran)
+
+    # Suppress OpenACC directives in mom6_mpi_domain.F90 for NVHPC
+    if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+      target_compile_options(mom6_mpi_serial_infra PRIVATE "-noacc")
+    endif()
+
     add_executable(rk2_mpi_serial_driver app/rk2_mpi_serial_driver.F90)
     target_link_libraries(rk2_mpi_serial_driver PRIVATE
-      mom6_modules mom6_serial_modules mom6_mpi_modules MPI::MPI_Fortran)
+      mom6_modules mom6_serial_modules mom6_mpi_serial_infra MPI::MPI_Fortran)
+    # Ensure serial MPI .mod files are found before GPU ones
+    target_include_directories(rk2_mpi_serial_driver BEFORE PRIVATE
+      ${CMAKE_BINARY_DIR}/mod_serial_mpi)
+
+    # Suppress ACC directives in transitively included module interfaces
+    if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+      target_compile_options(rk2_mpi_serial_driver PRIVATE "-noacc")
+    endif()
   endif()
 
   # CUDA C MPI (requires both MPI and CUDA C kernels + OMP halo exchange)
