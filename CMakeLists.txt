@@ -15,20 +15,20 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Compiler-specific flags
-if(CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
   message(STATUS "Detected NVIDIA HPC compiler (nvfortran)")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -mp=multicore,gpu -acc=multicore,gpu  -gpu=mem:separate -cudalib=nvtx")
 
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
   message(STATUS "Detected GNU Fortran compiler (gfortran)")
   set(CMAKE_Fortran_FLAGS
       "${CMAKE_Fortran_FLAGS} -O3 -fallow-argument-mismatch")
 
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "Intel")
   message(STATUS "Detected Intel Fortran compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -heap-arrays")
 
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "LLVMFlang")
+elseif(CMAKE_Fortran_COMPILER_ID STREQUAL "LLVMFlang")
   message(STATUS "Detected Flang compiler")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -fopenmp --offload-arch=gfx90a -fopenmp-offload-mandatory -fPIC")
 

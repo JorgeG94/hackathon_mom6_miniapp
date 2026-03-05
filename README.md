@@ -7,22 +7,43 @@ Standalone mini-applications extracted from MOM6 for GPU porting and benchmarkin
 ### CMake (recommended)
 
 ```bash
-# CPU (gfortran)
+# OpenMP target offloading (default backend — works with gfortran, ifx, amdflang, nvfortran)
 cmake -B build && cmake --build build
 
-# GPU (nvfortran, OpenACC + do concurrent)
+# OpenMP target with nvfortran
 cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran && cmake --build build
 
-# GPU with CUDA Fortran kernels
+# OpenACC (requires nvfortran)
+cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_OPENACC_KERNELS=ON && cmake --build build
+
+# CUDA Fortran (requires nvfortran)
 cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_CUDA_KERNELS=ON && cmake --build build
 
-# MPI + OpenACC (multi-GPU)
-cmake -B build -DCMAKE_Fortran_COMPILER=mpif90 -DMOM6_ENABLE_MPI=ON && cmake --build build
+# CUDA C (nvcc kernels + any Fortran compiler via iso_c_binding)
+cmake -B build -DMOM6_ENABLE_CUDA_C_KERNELS=ON && cmake --build build
 
-# MPI + CUDA Fortran (multi-GPU)
-cmake -B build -DCMAKE_Fortran_COMPILER=mpif90 -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_CUDA_KERNELS=ON && cmake --build build
+# Pure CPU serial (no GPU, baseline)
+cmake -B build -DMOM6_ENABLE_SERIAL_KERNELS=ON && cmake --build build
 
-# Also build individual module drivers (continuity, coriolis, etc.)
+# MPI + OpenMP target (multi-GPU)
+cmake -B build -DMOM6_ENABLE_MPI=ON && cmake --build build
+
+# MPI + OpenACC (multi-GPU, requires nvfortran)
+cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_OPENACC_KERNELS=ON && cmake --build build
+
+# MPI + CUDA Fortran (multi-GPU, requires nvfortran)
+cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_CUDA_KERNELS=ON && cmake --build build
+
+# MPI + CUDA C (multi-GPU)
+cmake -B build -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_CUDA_C_KERNELS=ON && cmake --build build
+
+# MPI + serial CPU (multi-node, no GPU)
+cmake -B build -DMOM6_ENABLE_MPI=ON -DMOM6_ENABLE_SERIAL_KERNELS=ON && cmake --build build
+
+# Build everything (all backends, MPI, all drivers)
+cmake -B build -DCMAKE_Fortran_COMPILER=nvfortran -DMOM6_ENABLE_ALL=ON && cmake --build build
+
+# Individual module drivers (continuity, coriolis, etc.)
 cmake -B build -DMOM6_ENABLE_MODULE_DRIVERS=ON && cmake --build build
 ```
 
@@ -30,9 +51,18 @@ cmake -B build -DMOM6_ENABLE_MODULE_DRIVERS=ON && cmake --build build
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `MOM6_ENABLE_CUDA_KERNELS` | OFF | Build CUDA Fortran kernel variants (requires nvfortran) |
-| `MOM6_ENABLE_MPI` | OFF | Build MPI-parallel drivers for multi-GPU/multi-node (requires MPI Fortran) |
-| `MOM6_ENABLE_MODULE_DRIVERS` | OFF | Build individual module drivers |
+| `MOM6_ENABLE_ALL` | OFF | Build all backends and drivers (super duper benchmarking) |
+| `MOM6_ENABLE_OMP_KERNELS` | **ON** | OpenMP target offloading (default backend, portable: NVIDIA/AMD/Intel) |
+| `MOM6_ENABLE_OPENACC_KERNELS` | OFF | OpenACC kernel variants (requires nvfortran) |
+| `MOM6_ENABLE_CUDA_KERNELS` | OFF | CUDA Fortran kernel variants (requires nvfortran) |
+| `MOM6_ENABLE_CUDA_C_KERNELS` | OFF | CUDA C kernel variants (nvcc + any Fortran compiler via iso_c_binding) |
+| `MOM6_ENABLE_SERIAL_KERNELS` | OFF | Pure CPU serial kernel variants (no GPU, baseline) |
+| `MOM6_ENABLE_MPI` | OFF | MPI-parallel drivers for multi-GPU/multi-node (requires MPI Fortran) |
+| `MOM6_ENABLE_SINGLE_GPU_DRIVERS` | **ON** | Single-GPU/single-node drivers |
+| `MOM6_ENABLE_MODULE_DRIVERS` | OFF | Individual module drivers (continuity, coriolis, etc.) |
+
+Supported compilers: `nvfortran` (NVHPC), `gfortran` (GNU), `ifx` (Intel), `amdflang`/`flang-new` (LLVM/AMD).
+OpenACC and CUDA Fortran require `nvfortran`. OpenMP target and serial work with all compilers.
 
 ### Make
 
@@ -50,23 +80,22 @@ make FC=gfortran                    # gfortran
 make FC=ifx                         # Intel
 ```
 
-### Fortran Package Manager
-
-```bash
-fpm install --prefix . --compiler nvfortran --flag "-O3 -acc=multicore,gpu -gpu=mem:separate"
-```
-
 ## Running
 
-### RK2 Driver (primary benchmark)
+### RK2 Drivers (primary benchmark)
 
 ```bash
-./rk2_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag]
+# Single-GPU / single-node drivers
+./build/rk2_omp_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag]    # OpenMP target (default)
+./build/rk2_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag]        # OpenACC
+./build/rk2_cuda_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag]   # CUDA Fortran
+./build/rk2_cuda_c_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag] # CUDA C
+./build/rk2_serial_driver [ni] [nj] [nk] [niter] [bt_nsteps] [diag] # Pure CPU serial
 
 # Examples
-./rk2_driver 180 180 75 10 30       # Default-ish grid
-./rk2_driver 720 720 75 10 50       # Large grid, diagnostics off
-./rk2_driver 720 720 75 10 50 1     # Large grid, diagnostics on
+./build/rk2_omp_driver 180 180 75 10 30       # Default-ish grid
+./build/rk2_omp_driver 720 720 75 10 50       # Large grid, diagnostics off
+./build/rk2_omp_driver 720 720 75 10 50 1     # Large grid, diagnostics on
 ```
 
 **Parameters:**
@@ -76,19 +105,22 @@ fpm install --prefix . --compiler nvfortran --flag "-O3 -acc=multicore,gpu -gpu=
 - `bt_nsteps`: Barotropic substeps per iteration (typically 30–100)
 - `diag`: Diagnostics mode (0=disabled, 1=enabled; default 0)
 
-### MPI Drivers (multi-GPU)
+### MPI Drivers (multi-GPU / multi-node)
 
 ```bash
-mpirun -np N ./rk2_mpi_driver ni nj nk niter bt_nsteps [npes_x npes_y]
-mpirun -np N ./rk2_mpi_cuda_driver ni nj nk niter bt_nsteps [npes_x npes_y]
+mpirun -np N ./build/rk2_mpi_omp_driver ni nj nk niter bt_nsteps [npes_x npes_y]   # OpenMP target
+mpirun -np N ./build/rk2_mpi_driver ni nj nk niter bt_nsteps [npes_x npes_y]        # OpenACC
+mpirun -np N ./build/rk2_mpi_cuda_driver ni nj nk niter bt_nsteps [npes_x npes_y]   # CUDA Fortran
+mpirun -np N ./build/rk2_mpi_cuda_c_driver ni nj nk niter bt_nsteps [npes_x npes_y] # CUDA C
+mpirun -np N ./build/rk2_mpi_serial_driver ni nj nk niter bt_nsteps [npes_x npes_y] # Serial CPU
 
 # Examples
-mpirun -np 4 ./rk2_mpi_driver 180 180 75 10 30           # 4 GPUs, auto layout
-mpirun -np 4 ./rk2_mpi_cuda_driver 360 360 75 10 30      # CUDA, 4 GPUs
-mpirun -np 6 ./rk2_mpi_driver 360 360 75 10 30 3 2       # 3x2 PE layout
+mpirun -np 4 ./build/rk2_mpi_omp_driver 180 180 75 10 30        # 4 GPUs, auto layout
+mpirun -np 4 ./build/rk2_mpi_cuda_driver 360 360 75 10 30       # CUDA, 4 GPUs
+mpirun -np 6 ./build/rk2_mpi_driver 360 360 75 10 30 3 2        # 3x2 PE layout
 
 # Multi-node
-mpirun -np 8 --npernode 4 ./rk2_mpi_cuda_driver 720 720 75 10 30
+mpirun -np 8 --npernode 4 ./build/rk2_mpi_cuda_driver 720 720 75 10 30
 ```
 
 **Additional parameters:**
@@ -273,29 +305,40 @@ hackathon_mom6_miniapp/
 │   │   ├── mom6_diag.F90              # Simplified diagnostics
 │   │   ├── mom6_mpi_domain.F90        # MPI domain decomposition (2D Cartesian)
 │   │   └── mom6_mpi_halo.F90         # OpenACC halo exchange (GPU-aware or host-staging)
-│   ├── openacc/
+│   ├── openacc/                       # OpenACC physics (nvfortran only)
 │   │   ├── mom6_continuity.F90        # PPM continuity solver
 │   │   ├── mom6_continuity_adjust.F90 # Continuity flux adjustment
 │   │   ├── mom6_coriolis.F90          # Coriolis acceleration
 │   │   ├── mom6_barotropic.F90        # Barotropic solver
 │   │   ├── mom6_vert_visc.F90         # Vertical viscosity
 │   │   └── mom6_hor_visc.F90          # Horizontal viscosity
-│   └── cuda/
-│       ├── mom6_continuity_cuda.F90   # CUDA Fortran continuity
-│       ├── mom6_coriolis_cuda.F90     # CUDA Fortran Coriolis
-│       ├── mom6_barotropic_cuda.F90   # CUDA Fortran barotropic
-│       ├── mom6_vert_visc_cuda.F90    # CUDA Fortran vertical viscosity
-│       ├── mom6_hor_visc_cuda.F90     # CUDA Fortran horizontal viscosity
-│       └── mom6_mpi_halo_cuda.F90    # CUDA halo exchange (GPU-aware or host-staging)
+│   ├── openmp/                        # OpenMP target offloading (portable: NVIDIA/AMD/Intel)
+│   │   ├── mom6_*_omp.F90            # Same 6 physics modules with _omp suffix
+│   │   └── mom6_mpi_halo_omp.F90     # OpenMP halo exchange
+│   ├── serial/                        # Pure CPU serial (no GPU directives, baseline)
+│   │   └── mom6_*_serial.F90         # 5 physics modules with _serial suffix
+│   ├── cudafor/                       # CUDA Fortran physics (nvfortran only)
+│   │   ├── cuda_workspace.F90         # Shared device memory pool
+│   │   ├── mom6_*_cuda.F90           # 5 physics modules with _cuda suffix
+│   │   └── mom6_mpi_halo_cuda.F90    # CUDA halo exchange (GPU-aware or host-staging)
+│   └── cuda_c/                        # CUDA C kernels (nvcc + any Fortran via iso_c_binding)
+│       ├── *.cu                       # CUDA C kernel implementations
+│       └── *_wrapper.F90             # Fortran iso_c_binding wrappers
 ├── app/
-│   ├── rk2_driver.F90                 # OpenACC RK2 driver (single GPU)
-│   ├── rk2_cuda_driver.F90            # CUDA RK2 driver (single GPU)
-│   ├── rk2_mpi_driver.F90            # MPI + OpenACC RK2 driver (multi-GPU)
-│   ├── rk2_mpi_cuda_driver.F90       # MPI + CUDA RK2 driver (multi-GPU)
+│   ├── rk2_driver.F90                 # OpenACC single-GPU driver
+│   ├── rk2_omp_driver.F90            # OpenMP target single-GPU driver
+│   ├── rk2_cuda_driver.F90            # CUDA Fortran single-GPU driver
+│   ├── rk2_cuda_c_driver.F90         # CUDA C single-GPU driver
+│   ├── rk2_serial_driver.F90         # Pure CPU serial driver
+│   ├── rk2_mpi_driver.F90            # MPI + OpenACC multi-GPU driver
+│   ├── rk2_mpi_omp_driver.F90        # MPI + OpenMP target multi-GPU driver
+│   ├── rk2_mpi_cuda_driver.F90       # MPI + CUDA Fortran multi-GPU driver
+│   ├── rk2_mpi_cuda_c_driver.F90     # MPI + CUDA C multi-GPU driver
+│   ├── rk2_mpi_serial_driver.F90     # MPI + serial CPU multi-node driver
 │   └── module_drivers/               # Individual module drivers
+├── scripts/                           # Benchmark/scaling scripts + plotting
 ├── CMakeLists.txt
-├── Makefile
-└── fpm.toml
+└── Makefile
 ```
 
 ## Module Dependencies
