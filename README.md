@@ -2,6 +2,10 @@
 
 Standalone mini-applications extracted from MOM6 for GPU porting and benchmarking. The primary driver (`rk2_driver`) implements the full split RK2 time-stepping algorithm combining all solvers; individual module drivers are available for focused testing.
 
+I ended up getting a bit more obssessed with this miniapp than I expected. I currently has multiple backends to enable a good set of comparisons for possible inclusion into real MOM6. We have OpenMP (portable across AMD, NVIDIA, and Intel), OpenACC (CPU, NVIDIA), CUDA-Fortran (NVIDIA), and CUDA (which should be compilable to HIP and IntelLZ). Some small changes need to be done there, cuda-c on non nvidia platforms has not been tested. 
+
+Overall, cuda-fortran and cuda-c give the same performance. OpenMP tends to be the slowest but it is the most portable across GPUs. OpenACC is midground between OpenMP and CUDA. 
+
 ## Building
 
 ### CMake (recommended)
